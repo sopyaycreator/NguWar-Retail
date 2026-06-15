@@ -46,6 +46,13 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     });
   }
 
+  String _extractDateKey(String rawDateStr) {
+    if (rawDateStr.length >= 10) {
+      return rawDateStr.substring(0, 10);
+    }
+    return '';
+  }
+
   Map<String, Map<String, int>> _buildDailyItemTotals(
     List<Map<String, dynamic>> historyLogs,
   ) {
@@ -125,8 +132,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                             ),
                           ),
                         ),
-                       
-                       
                       ],
                     ),
                   ),
@@ -190,7 +195,37 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                         );
                       }
 
-                      final historyLogs = snapshot.data!;
+                      final List<Map<String, dynamic>> allHistoryLogs =
+                          snapshot.data!;
+
+                      final List<Map<String, dynamic>> historyLogs =
+                          _selectedFilterDateText == null
+                          ? allHistoryLogs
+                          : allHistoryLogs.where((sale) {
+                              final String rawDateStr =
+                                  sale['saleDate']?.toString() ?? '';
+                              return _extractDateKey(rawDateStr) ==
+                                  _selectedFilterDateText;
+                            }).toList();
+
+                      if (historyLogs.isEmpty) {
+                        return ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: [
+                            const SizedBox(height: 100),
+                            Center(
+                              child: Text(
+                                _selectedFilterDateText == null
+                                    ? "No transaction history records discovered yet."
+                                    : "No transactions found on $_selectedFilterDateText",
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.grey),
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+
                       final dailyItemTotals = _buildDailyItemTotals(
                         historyLogs,
                       );
