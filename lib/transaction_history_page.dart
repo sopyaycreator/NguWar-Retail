@@ -13,6 +13,38 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       GlobalKey<RefreshIndicatorState>();
 
   bool _showDailyItemTotals = false;
+  DateTime? _selectedFilterDate;
+  String? _selectedFilterDateText;
+  Future<void> _pickFilterDate() async {
+    final DateTime now = DateTime.now();
+
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedFilterDate ?? now,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+      helpText: 'Select transaction date',
+    );
+
+    if (picked == null) return;
+
+    final String formatted =
+        "${picked.year.toString().padLeft(4, '0')}-"
+        "${picked.month.toString().padLeft(2, '0')}-"
+        "${picked.day.toString().padLeft(2, '0')}";
+
+    setState(() {
+      _selectedFilterDate = picked;
+      _selectedFilterDateText = formatted;
+    });
+  }
+
+  void _clearFilterDate() {
+    setState(() {
+      _selectedFilterDate = null;
+      _selectedFilterDateText = null;
+    });
+  }
 
   Map<String, Map<String, int>> _buildDailyItemTotals(
     List<Map<String, dynamic>> historyLogs,
@@ -54,6 +86,20 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
         title: const Text("Transaction History"),
         centerTitle: true,
         elevation: 0,
+        backgroundColor: Colors.amber,
+        actions: [
+          IconButton(
+            tooltip: "Search by date",
+            onPressed: _pickFilterDate,
+            icon: const Icon(Icons.search),
+          ),
+          if (_selectedFilterDateText != null)
+            IconButton(
+              tooltip: "Clear date filter",
+              onPressed: _clearFilterDate,
+              icon: const Icon(Icons.close),
+            ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -65,15 +111,23 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Expanded(
-                    child: Text(
-                      _showDailyItemTotals
-                          ? "📦 Daily Item Totals"
-                          : "📜 Full Archive Sorted by Day",
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.grey,
-                      ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _showDailyItemTotals
+                                ? "📦 Daily Item Totals"
+                                : "📜 Full Archive Sorted by Day",
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ),
+                       
+                       
+                      ],
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -95,6 +149,17 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                   ),
                 ],
               ),
+              if (_selectedFilterDateText != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  "Filtered date: $_selectedFilterDateText",
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.deepOrange,
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               Expanded(
                 child: RefreshIndicator(
