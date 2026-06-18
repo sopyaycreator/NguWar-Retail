@@ -192,22 +192,24 @@ class DBHelper {
   );
 }
 
-  static Future<void> updateItemQuantity(String barcode, int newQty) async {
-    final db = await database;
+ static Future<void> updateItemQuantity(String barcode, int newQty) async {
+  final db = await database;
 
-    final item = await getItemByBarcode(barcode);
-    if (item == null) return;
+  final item = await getItemByBarcode(barcode);
+  if (item == null) return;
 
-    final int trackStock = (item['trackStock'] as num?)?.toInt() ?? 1;
-    if (trackStock == 0) return;
+  final int trackStock = (item['trackStock'] as num?)?.toInt() ?? 1;
+  if (trackStock == 0) return;
 
-    await db.update(
-      'items',
-      {'quantity': newQty < 0 ? 0 : newQty},
-      where: 'barcode = ?',
-      whereArgs: [barcode],
-    );
-  }
+  await db.update(
+    'items',
+    {
+      'quantity': newQty,
+    },
+    where: 'barcode = ?',
+    whereArgs: [barcode],
+  );
+}
 
   static Future<void> deleteItem(String barcode) async {
     final db = await database;

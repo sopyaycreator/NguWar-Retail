@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:nguwar/inventory_page.dart';
+
 import 'package:nguwar/splash_screen.dart';
 import 'package:nguwar/transaction_history_page.dart';
 import 'db_helper.dart';
@@ -242,8 +242,6 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final int totalAvailableStock =
-        (matchedItem['quantity'] as num?)?.toInt() ?? 0;
     final int trackStock = (matchedItem['trackStock'] as num?)?.toInt() ?? 1;
     final int saleEffect = (matchedItem['saleEffect'] as num?)?.toInt() ?? 1;
     final String productName =
@@ -258,19 +256,6 @@ class _HomePageState extends State<HomePage> {
     final int quantityInBasketAlready = basketIndex != -1
         ? ((_activeCart[basketIndex]['quantity'] as num?)?.toInt() ?? 0)
         : 0;
-
-    if (trackStock == 1 && quantityInBasketAlready >= totalAvailableStock) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "⚠️ Cannot add $productName. Stock limit reached ($totalAvailableStock)!",
-          ),
-          backgroundColor: Colors.orange,
-          duration: const Duration(seconds: 1),
-        ),
-      );
-      return;
-    }
 
     setState(() {
       if (basketIndex != -1) {
@@ -326,8 +311,8 @@ class _HomePageState extends State<HomePage> {
         final String name = cartItem['name']?.toString() ?? 'Unknown Item';
 
         if (trackStock == 1) {
-          int absoluteNewStock = originalStock - purchaseQty;
-          if (absoluteNewStock < 0) absoluteNewStock = 0;
+          // Allow negative stock
+          final int absoluteNewStock = originalStock - purchaseQty;
 
           await DBHelper.updateItemQuantity(barcode, absoluteNewStock);
         }
@@ -693,6 +678,51 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void _increaseCartQty(int index) {
+    setState(() {
+      final item = Map<String, Object?>.from(_activeCart[index]);
+      final int currentQty = (item['quantity'] as num?)?.toInt() ?? 0;
+
+      item['quantity'] = currentQty + 1;
+      _activeCart[index] = item;
+    });
+  }
+
+  void _decreaseCartQty(int index) {
+    setState(() {
+      final item = Map<String, Object?>.from(_activeCart[index]);
+      final int currentQty = (item['quantity'] as num?)?.toInt() ?? 0;
+
+      if (currentQty <= 1) {
+        _activeCart.removeAt(index);
+      } else {
+        item['quantity'] = currentQty - 1;
+        _activeCart[index] = item;
+      }
+    });
+  }
+
+  void _removeCartItem(int index) {
+    setState(() {
+      _activeCart.removeAt(index);
+    });
+  }
+
+  Widget _cartIconButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 22),
+      color: color,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
   Widget _buildHomeTab() {
     return Padding(
       padding: const EdgeInsets.all(12.0),
@@ -758,32 +788,114 @@ class _HomePageState extends State<HomePage> {
                         final double totalItemCost =
                             unitPrice * qty * saleEffect;
 
-                        return ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: saleEffect == -1
-                                ? Colors.red.shade100
-                                : Colors.amber.shade200,
-                            child: Text(
-                              "${qty}x",
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.black,
-                              ),
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                          child: Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.08),
+                                  blurRadius: 4,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
                             ),
-                          ),
-                          title: Text(name),
-                          subtitle: Text(
-                            saleEffect == -1
-                                ? "Deduct item: ${unitPrice.toStringAsFixed(0)} MMK"
-                                : "Unit Price: ${unitPrice.toStringAsFixed(0)} MMK",
-                          ),
-                          trailing: Text(
-                            "${totalItemCost.toStringAsFixed(0)} MMK",
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: saleEffect == -1
-                                  ? Colors.red
-                                  : Colors.green,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 24,
+                                      backgroundColor: saleEffect == -1
+                                          ? Colors.red.shade100
+                                          : Colors.amber.shade200,
+                                      child: Text(
+                                        "${qty}x",
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.black,
+                                        ),
+                                      ),
+                                    ),
+
+                                    const SizedBox(width: 12),
+
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            name,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 3),
+                                          Text(
+                                            saleEffect == -1
+                                                ? "Deduct item: ${unitPrice.toStringAsFixed(0)} MMK"
+                                                : "Unit Price: ${unitPrice.toStringAsFixed(0)} MMK",
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 13,
+                                              color: Colors.black54,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        "${totalItemCost.toStringAsFixed(0)} MMK",
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: saleEffect == -1
+                                              ? Colors.red
+                                              : Colors.green,
+                                        ),
+                                      ),
+                                    ),
+
+                                    _cartIconButton(
+                                      icon: Icons.remove_circle_outline,
+                                      color: Colors.orange,
+                                      onPressed: () => _decreaseCartQty(index),
+                                    ),
+
+                                    _cartIconButton(
+                                      icon: Icons.add_circle_outline,
+                                      color: Colors.green,
+                                      onPressed: () => _increaseCartQty(index),
+                                    ),
+
+                                    _cartIconButton(
+                                      icon: Icons.delete,
+                                      color: Colors.red,
+                                      onPressed: () => _removeCartItem(index),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
                         );
@@ -998,17 +1110,6 @@ class _HomePageState extends State<HomePage> {
                                       fontWeight: FontWeight.bold,
                                       color: Colors.green,
                                     ),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.delete,
-                                      color: Colors.red,
-                                      size: 16,
-                                    ),
-                                    onPressed: () async {
-                                      await DBHelper.deleteSale(id);
-                                      setState(() {});
-                                    },
                                   ),
                                 ],
                               ),

@@ -20,6 +20,7 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
         title: const Text("Item History"),
         centerTitle: true,
         elevation: 0,
+        backgroundColor: Colors.amber,
       ),
       body: SafeArea(
         child: Padding(

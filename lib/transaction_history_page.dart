@@ -402,19 +402,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                                           ),
                                         ),
                                         const SizedBox(width: 4),
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.delete_outline,
-                                            color: Colors.red,
-                                            size: 18,
-                                          ),
-                                          onPressed: () async {
-                                            await DBHelper.deleteSale(
-                                              saleRecord['id'],
-                                            );
-                                            setState(() {});
-                                          },
-                                        ),
+                                      
                                       ],
                                     ),
                                   ),
