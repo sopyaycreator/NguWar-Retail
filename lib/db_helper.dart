@@ -210,6 +210,45 @@ class DBHelper {
     whereArgs: [barcode],
   );
 }
+static Future<void> updateItemOnly({
+  required String barcode,
+  required String name,
+  required int quantity,
+  required double priceUnit,
+  required int trackStock,
+  required int saleEffect,
+}) async {
+  final db = await database;
+
+  if (barcode.trim().isEmpty || name.trim().isEmpty) {
+    throw Exception("Barcode and name are required.");
+  }
+
+  final int updatedRows = await db.update(
+    'items',
+    {
+      'name': name.trim(),
+      'quantity': trackStock == 1 ? quantity : 0,
+      'priceUnit': priceUnit,
+      'trackStock': trackStock,
+      'saleEffect': trackStock == 1 ? 1 : saleEffect,
+    },
+    where: 'barcode = ?',
+    whereArgs: [barcode.trim()],
+  );
+
+  if (updatedRows == 0) {
+    throw Exception("Item not found. Update failed.");
+  }
+
+  await db.insert('item_history', {
+    'itemName': name.trim(),
+    'barcode': barcode.trim(),
+    'action': 'Edited Item',
+    'qty': trackStock == 1 ? quantity : 0,
+    'createdAt': DateTime.now().toIso8601String(),
+  });
+}
 
   static Future<void> deleteItem(String barcode) async {
     final db = await database;

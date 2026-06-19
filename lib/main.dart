@@ -50,10 +50,31 @@ class _HomePageState extends State<HomePage> {
   int _saleEffect = 1;
   bool _isScanningCode = false;
   int _selectedIndex = 0;
+  final FocusNode _nameFocusNode = FocusNode();
+  bool _editUnlocked = false;
+  bool _showInventoryPasswordBox = false;
+  final TextEditingController _inventoryPasswordController =
+      TextEditingController();
+
+  // Change this password as you want.
+  static const String _inventoryEditPassword = "5408098";
+
+  List<Map<String, Object?>> _inventoryItems = [];
 
   @override
   void initState() {
     super.initState();
+    _loadInventoryItems();
+  }
+
+  Future<void> _loadInventoryItems() async {
+    final items = await DBHelper.getItems();
+
+    if (!mounted) return;
+
+    setState(() {
+      _inventoryItems = items;
+    });
   }
 
   @override
@@ -64,6 +85,8 @@ class _HomePageState extends State<HomePage> {
     _barcodeController.dispose();
     _checkoutScanController.dispose();
     _checkoutScanFocusNode.dispose();
+    _nameFocusNode.dispose();
+    _inventoryPasswordController.dispose();
     super.dispose();
   }
 
@@ -156,6 +179,7 @@ class _HomePageState extends State<HomePage> {
         'trackStock': _trackStock ? 1 : 0,
         'saleEffect': _trackStock ? 1 : _saleEffect,
       });
+      await _loadInventoryItems();
 
       if (!mounted) return;
 
@@ -342,6 +366,172 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Widget _buildTransactionLogsTab() {
+    return Padding(
+      padding: const EdgeInsets.all(12.0),
+      child: Column(
+        children: [
+          GestureDetector(
+            onTap: () {
+              Navigator.of(context)
+                  .push(
+                    MaterialPageRoute(
+                      builder: (context) => const TransactionHistoryPage(),
+                    ),
+                  )
+                  .then((_) {
+                    setState(() {});
+                  });
+            },
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
+                color: Colors.transparent,
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      "📜 Completed Transaction Logs",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      size: 14,
+                      color: Colors.black,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 10),
+
+          Expanded(
+            child: FutureBuilder<List<Map<String, Object?>>>(
+              future: DBHelper.getSales(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final historyLogs = snapshot.data!;
+
+                if (historyLogs.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      "No transaction history records discovered yet.",
+                    ),
+                  );
+                }
+
+                final Map<String, List<Map<String, Object?>>> groupedLogs = {};
+
+                for (final sale in historyLogs) {
+                  final String rawDateStr = sale['saleDate']?.toString() ?? '';
+                  final String dateKey = rawDateStr.length >= 10
+                      ? rawDateStr.substring(0, 10)
+                      : "Unknown Date";
+
+                  groupedLogs.putIfAbsent(dateKey, () => []);
+                  groupedLogs[dateKey]!.add(sale);
+                }
+
+                final List<String> sortedDates = groupedLogs.keys.toList();
+
+                return ListView.builder(
+                  itemCount: sortedDates.length,
+                  itemBuilder: (context, dateIndex) {
+                    final String dateHeader = sortedDates[dateIndex];
+                    final List<Map<String, Object?>> dailySales =
+                        groupedLogs[dateHeader]!;
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 8.0,
+                            horizontal: 4.0,
+                          ),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade300,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              "📅 $dateHeader",
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.grey.shade800,
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        ...dailySales.map((saleRecord) {
+                          final String saleDate =
+                              saleRecord['saleDate']?.toString() ?? '';
+
+                          final String timeDisplay = saleDate.length >= 16
+                              ? saleDate.substring(11, 16)
+                              : "00:00";
+
+                          final String type =
+                              saleRecord['type']?.toString() ?? '';
+
+                          final double price =
+                              (saleRecord['price'] as num?)?.toDouble() ?? 0.0;
+
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            child: ListTile(
+                              dense: true,
+                              leading: const Icon(
+                                Icons.receipt_long,
+                                color: Colors.green,
+                              ),
+                              title: Text(
+                                type,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              subtitle: Text(
+                                "Time: $timeDisplay",
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              trailing: Text(
+                                "${price.toStringAsFixed(0)} MMK",
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.green,
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   double _getCartTotalCost() {
     return _activeCart.fold(0.0, (sum, item) {
       final double price = (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
@@ -385,25 +575,312 @@ class _HomePageState extends State<HomePage> {
     _quantityController.text = qty.toString();
   }
 
+  void _checkInventoryPassword() {
+    final String password = _inventoryPasswordController.text.trim();
+
+    if (password == _inventoryEditPassword) {
+      setState(() {
+        _editUnlocked = true;
+        _showInventoryPasswordBox = false;
+        _inventoryPasswordController.clear();
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("✅ Edit mode unlocked"),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("❌ Wrong password"),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmDeleteItem(Map<String, Object?> item) async {
+    final String barcode = item['barcode']?.toString() ?? '';
+    final String name = item['name']?.toString() ?? 'Unknown Item';
+    final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
+
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text("Delete Item"),
+          content: Text(
+            "Are you sure you want to delete this item?\n\n$name\nBarcode: $barcode",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              icon: const Icon(Icons.delete),
+              label: const Text("Delete"),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
+
+    await DBHelper.insertItemHistory(
+      itemName: name,
+      barcode: barcode,
+      action: "Deleted Item",
+      qty: qty,
+    );
+
+    await DBHelper.deleteItem(barcode);
+
+    if (!mounted) return;
+
+    setState(() {});
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("🗑️ Item deleted successfully"),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+
+  Future<void> _showEditItemDialog(Map<String, Object?> item) async {
+    final String barcode = item['barcode']?.toString() ?? '';
+
+    final TextEditingController nameController = TextEditingController(
+      text: item['name']?.toString() ?? '',
+    );
+
+    final TextEditingController quantityController = TextEditingController(
+      text: ((item['quantity'] as num?)?.toInt() ?? 0).toString(),
+    );
+
+    final TextEditingController priceController = TextEditingController(
+      text: ((item['priceUnit'] as num?)?.toDouble() ?? 0.0).toStringAsFixed(0),
+    );
+
+    bool trackStock = ((item['trackStock'] as num?)?.toInt() ?? 1) == 1;
+    int saleEffect = (item['saleEffect'] as num?)?.toInt() ?? 1;
+
+    final bool? saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text("Edit Inventory Item"),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      enabled: false,
+                      decoration: InputDecoration(
+                        labelText: "Barcode",
+                        border: const OutlineInputBorder(),
+                        helperText: barcode,
+                      ),
+                    ),
+
+                    const SizedBox(height: 14),
+
+                    TextField(
+                      controller: nameController,
+                      decoration: const InputDecoration(
+                        labelText: "Product Name",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+
+                    const SizedBox(height: 14),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text("Track Inventory Stock"),
+                      value: trackStock,
+                      onChanged: (value) {
+                        setDialogState(() {
+                          trackStock = value;
+                        });
+                      },
+                    ),
+
+                    if (trackStock) ...[
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: quantityController,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: "Quantity",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+
+                    if (!trackStock) ...[
+                      const SizedBox(height: 14),
+                      DropdownButtonFormField<int>(
+                        value: saleEffect,
+                        decoration: const InputDecoration(
+                          labelText: "Non-stock behavior",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 1, child: Text("Ice")),
+                          DropdownMenuItem(
+                            value: -1,
+                            child: Text("Lottery cap"),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          setDialogState(() {
+                            saleEffect = value ?? 1;
+                          });
+                        },
+                      ),
+                    ],
+
+                    const SizedBox(height: 14),
+
+                    TextField(
+                      controller: priceController,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: "Unit Price",
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text("Cancel"),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    final String name = nameController.text.trim();
+                    final int quantity =
+                        int.tryParse(quantityController.text.trim()) ?? 0;
+                    final double price =
+                        double.tryParse(priceController.text.trim()) ?? 0.0;
+
+                    if (name.isEmpty || price <= 0) {
+                      if (!mounted) return;
+
+                      ScaffoldMessenger.of(this.context).showSnackBar(
+                        const SnackBar(
+                          content: Text("⚠️ Name and valid price are required"),
+                        ),
+                      );
+                      return;
+                    }
+
+                    try {
+                      // Important: remove focus from TextField / Dropdown before closing dialog
+                      FocusManager.instance.primaryFocus?.unfocus();
+
+                      await DBHelper.updateItemOnly(
+                        barcode: barcode,
+                        name: name,
+                        quantity: quantity,
+                        priceUnit: price,
+                        trackStock: trackStock ? 1 : 0,
+                        saleEffect: trackStock ? 1 : saleEffect,
+                      );
+
+                      await Future.delayed(const Duration(milliseconds: 100));
+
+                      if (dialogContext.mounted) {
+                        Navigator.of(
+                          dialogContext,
+                          rootNavigator: true,
+                        ).pop(true);
+                      }
+                    } catch (e) {
+                      if (!mounted) return;
+
+                      ScaffoldMessenger.of(this.context).showSnackBar(
+                        SnackBar(
+                          content: Text("❌ Update failed: $e"),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.save),
+                  label: const Text("Update"),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    nameController.dispose();
+    quantityController.dispose();
+    priceController.dispose();
+
+    if (!mounted) return;
+
+    if (saved == true) {
+      if (!mounted) return;
+
+      setState(() {});
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(this.context).showSnackBar(
+          const SnackBar(
+            content: Text("✅ Item updated successfully"),
+            backgroundColor: Colors.green,
+          ),
+        );
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        key: _scaffoldKey,
-        onDrawerChanged: (isOpened) {
-          if (isOpened) {
-            _checkoutScanFocusNode.unfocus();
-          } else if (_hardwareScannerMode) {
-            _requestHardwareScannerFocus();
-          }
-        },
-        backgroundColor: const Color(0xFFF6F6F6),
-        appBar: AppBar(
-          title: const Text("🛒 Stock"),
-          centerTitle: true,
-          backgroundColor: Colors.amber,
-          actions: [
+    return Scaffold(
+      key: _scaffoldKey,
+      onDrawerChanged: (isOpened) {
+        if (isOpened) {
+          _checkoutScanFocusNode.unfocus();
+        } else if (_hardwareScannerMode) {
+          _requestHardwareScannerFocus();
+        }
+      },
+      backgroundColor: const Color(0xFFF6F6F6),
+      appBar: AppBar(
+        title: Text(
+          _selectedIndex == 0
+              ? "🛒 Stock"
+              : _selectedIndex == 1
+              ? "📜 Transaction Logs"
+              : "📦 Inventory",
+        ),
+        centerTitle: true,
+        backgroundColor: Colors.amber,
+        actions: [
+          if (_selectedIndex == 0) ...[
             IconButton(
               icon: Icon(
                 Icons.usb,
@@ -424,256 +901,381 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(width: 8),
           ],
-        ),
-        drawer: Drawer(
-          child: SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.add_business, color: Colors.amber, size: 28),
-                      SizedBox(width: 10),
-                      Text(
-                        "Add New Item",
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
+
+          if (_selectedIndex == 2) ...[
+            IconButton(
+              tooltip: _editUnlocked ? "Lock edit mode" : "Unlock edit mode",
+              icon: Icon(
+                _editUnlocked ? Icons.lock_open : Icons.lock,
+                color: _editUnlocked ? Colors.green.shade900 : Colors.black87,
+              ),
+              onPressed: () {
+                if (_editUnlocked) {
+                  setState(() {
+                    _editUnlocked = false;
+                    _showInventoryPasswordBox = false;
+                    _inventoryPasswordController.clear();
+                  });
+
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("🔒 Edit mode locked")),
+                  );
+                } else {
+                  setState(() {
+                    _showInventoryPasswordBox = !_showInventoryPasswordBox;
+                  });
+                }
+              },
+            ),
+            const SizedBox(width: 8),
+          ],
+        ],
+      ),
+      drawer: Drawer(
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.add_business, color: Colors.amber, size: 28),
+                    SizedBox(width: 10),
+                    Text(
+                      "Add New Item",
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
                       ),
-                    ],
-                  ),
-                  const Divider(height: 30),
-                  SwitchListTile(
-                    title: const Text("Track Inventory Stock"),
-                    subtitle: Text(
-                      _trackStock
-                          ? "This item reduces store stock"
-                          : "This item is sellable but not stock-tracked",
                     ),
-                    value: _trackStock,
+                  ],
+                ),
+                const Divider(height: 30),
+                SwitchListTile(
+                  title: const Text("Track Inventory Stock"),
+                  subtitle: Text(
+                    _trackStock
+                        ? "This item reduces store stock"
+                        : "This item is sellable but not stock-tracked",
+                  ),
+                  value: _trackStock,
+                  onChanged: (value) {
+                    setState(() {
+                      _trackStock = value;
+                      _clearDrawerFields();
+                    });
+                  },
+                ),
+                if (!_trackStock) ...[
+                  DropdownButtonFormField<int>(
+                    value: _saleEffect,
+                    decoration: const InputDecoration(
+                      labelText: "Non-stock behavior",
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 1, child: Text("Ice")),
+                      DropdownMenuItem(value: -1, child: Text("Lottery cap")),
+                    ],
                     onChanged: (value) {
                       setState(() {
-                        _trackStock = value;
-                        _clearDrawerFields();
+                        _saleEffect = value ?? 1;
                       });
                     },
                   ),
-                  if (!_trackStock) ...[
-                    DropdownButtonFormField<int>(
-                      value: _saleEffect,
-                      decoration: const InputDecoration(
-                        labelText: "Non-stock behavior",
-                        border: OutlineInputBorder(),
+                  const SizedBox(height: 16),
+                ],
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _barcodeController,
+                        decoration: const InputDecoration(
+                          labelText: "Barcode (ID)",
+                          border: OutlineInputBorder(),
+                        ),
+                        onChanged: (value) async {
+                          if (value.trim().isEmpty) return;
+
+                          final matched = await DBHelper.getItemByBarcode(
+                            value.trim(),
+                          );
+
+                          if (matched != null && mounted) {
+                            setState(() {
+                              _fillDrawerWithMatchedItem(matched);
+                            });
+                          }
+                        },
                       ),
-                      items: const [
-                        DropdownMenuItem(value: 1, child: Text("Ice")),
-                        DropdownMenuItem(value: -1, child: Text("Lottery cap")),
-                      ],
-                      onChanged: (value) {
-                        setState(() {
-                          _saleEffect = value ?? 1;
-                        });
-                      },
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (dialogCtx) => AlertDialog(
+                            title: const Text("Scan Stock Barcode"),
+                            content: SizedBox(
+                              width: double.maxFinite,
+                              height: 300,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: MobileScanner(
+                                  onDetect: (BarcodeCapture capture) async {
+                                    final List<Barcode> barcodes =
+                                        capture.barcodes;
+                                    if (barcodes.isEmpty) return;
+
+                                    final String? code =
+                                        barcodes.first.rawValue;
+                                    if (code == null) return;
+
+                                    Navigator.of(dialogCtx).pop();
+
+                                    setState(() {
+                                      _barcodeController.text = code;
+                                    });
+
+                                    final matched =
+                                        await DBHelper.getItemByBarcode(code);
+
+                                    if (matched != null && mounted) {
+                                      setState(() {
+                                        _fillDrawerWithMatchedItem(matched);
+                                      });
+                                    }
+                                  },
+                                ),
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(dialogCtx).pop(),
+                                child: const Text("Cancel"),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.camera_alt),
+                    ),
                   ],
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _barcodeController,
+                ),
+                const SizedBox(height: 16),
+                RawAutocomplete<Map<String, Object?>>(
+                  textEditingController: _nameController,
+                  focusNode: _nameFocusNode,
+
+                  displayStringForOption: (item) {
+                    return item['name']?.toString() ?? '';
+                  },
+
+                  optionsBuilder: (TextEditingValue textEditingValue) {
+                    final keyword = textEditingValue.text.trim().toLowerCase();
+
+                    if (keyword.isEmpty) {
+                      return const Iterable<Map<String, Object?>>.empty();
+                    }
+
+                    return _inventoryItems
+                        .where((item) {
+                          final name =
+                              item['name']?.toString().toLowerCase() ?? '';
+                          return name.contains(keyword);
+                        })
+                        .take(10);
+                  },
+
+                  onSelected: (item) {
+                    setState(() {
+                      _fillDrawerWithMatchedItem(item);
+                    });
+                  },
+
+                  fieldViewBuilder:
+                      (
+                        BuildContext context,
+                        TextEditingController controller,
+                        FocusNode focusNode,
+                        VoidCallback onFieldSubmitted,
+                      ) {
+                        return TextField(
+                          controller: controller,
+                          focusNode: focusNode,
                           decoration: const InputDecoration(
-                            labelText: "Barcode (ID)",
+                            labelText: "Product Name",
+                            hintText: "Search from inventory",
+                            prefixIcon: Icon(Icons.search),
                             border: OutlineInputBorder(),
                           ),
-                          onChanged: (value) async {
-                            if (value.trim().isEmpty) return;
+                        );
+                      },
 
-                            final matched = await DBHelper.getItemByBarcode(
-                              value.trim(),
-                            );
+                  optionsViewBuilder:
+                      (
+                        BuildContext context,
+                        AutocompleteOnSelected<Map<String, Object?>> onSelected,
+                        Iterable<Map<String, Object?>> options,
+                      ) {
+                        return Align(
+                          alignment: Alignment.topLeft,
+                          child: Material(
+                            elevation: 4,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                maxHeight: 250,
+                                maxWidth: 320,
+                              ),
+                              child: ListView.builder(
+                                padding: EdgeInsets.zero,
+                                shrinkWrap: true,
+                                itemCount: options.length,
+                                itemBuilder: (context, index) {
+                                  final item = options.elementAt(index);
 
-                            if (matched != null && mounted) {
-                              setState(() {
-                                _fillDrawerWithMatchedItem(matched);
-                              });
-                            }
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton.filledTonal(
-                        onPressed: () {
-                          showDialog(
-                            context: context,
-                            builder: (dialogCtx) => AlertDialog(
-                              title: const Text("Scan Stock Barcode"),
-                              content: SizedBox(
-                                width: double.maxFinite,
-                                height: 300,
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: MobileScanner(
-                                    onDetect: (BarcodeCapture capture) async {
-                                      final List<Barcode> barcodes =
-                                          capture.barcodes;
-                                      if (barcodes.isEmpty) return;
+                                  final name = item['name']?.toString() ?? '';
+                                  final barcode =
+                                      item['barcode']?.toString() ?? '';
+                                  final quantity =
+                                      item['quantity']?.toString() ?? '0';
+                                  final price =
+                                      item['priceUnit']?.toString() ?? '0';
 
-                                      final String? code =
-                                          barcodes.first.rawValue;
-                                      if (code == null) return;
-
-                                      Navigator.of(dialogCtx).pop();
-
-                                      setState(() {
-                                        _barcodeController.text = code;
-                                      });
-
-                                      final matched =
-                                          await DBHelper.getItemByBarcode(code);
-
-                                      if (matched != null && mounted) {
-                                        setState(() {
-                                          _fillDrawerWithMatchedItem(matched);
-                                        });
-                                      }
+                                  return ListTile(
+                                    dense: true,
+                                    title: Text(name),
+                                    subtitle: Text(
+                                      "Barcode: $barcode • Qty: $quantity • Price: $price",
+                                    ),
+                                    onTap: () {
+                                      onSelected(item);
                                     },
-                                  ),
-                                ),
+                                  );
+                                },
                               ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () =>
-                                      Navigator.of(dialogCtx).pop(),
-                                  child: const Text("Cancel"),
-                                ),
-                              ],
                             ),
-                          );
-                        },
-                        icon: const Icon(Icons.camera_alt),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
+                          ),
+                        );
+                      },
+                ),
+                const SizedBox(height: 16),
+                if (_trackStock) ...[
                   TextField(
-                    controller: _nameController,
+                    controller: _quantityController,
+                    keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
-                      labelText: "Product Name",
+                      labelText: "Quantity Stock",
+                      helperText: "e.g., 10",
                       border: OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 16),
-                  if (_trackStock) ...[
-                    TextField(
-                      controller: _quantityController,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: "Quantity Stock",
-                        helperText: "e.g., 10",
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  TextField(
-                    controller: _priceController,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: "Unit Price (Each Item)",
-                      helperText: "e.g., 1000 MMK for each single item",
-                      border: OutlineInputBorder(),
-                    ),
+                ],
+                TextField(
+                  controller: _priceController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
                   ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: ElevatedButton.icon(
-                      onPressed: _saveItemFromDrawer,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.amber,
-                      ),
-                      icon: const Icon(Icons.save, color: Colors.black),
-                      label: const Text(
-                        "Save Item Data",
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black,
-                        ),
+                  decoration: const InputDecoration(
+                    labelText: "Unit Price (Each Item)",
+                    helperText: "e.g., 1000 MMK for each single item",
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton.icon(
+                    onPressed: _saveItemFromDrawer,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amber,
+                    ),
+                    icon: const Icon(Icons.save, color: Colors.black),
+                    label: const Text(
+                      "Save Item Data",
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.black,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  GestureDetector(
-                    onTap: () {
-                      Navigator.of(context)
-                          .push(
-                            MaterialPageRoute(
-                              builder: (context) => const ItemHistoryPage(),
-                            ),
-                          )
-                          .then((_) {
-                            setState(() {});
-                          });
-                    },
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 6.0),
-                        color: Colors.transparent,
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              "📜 Full Item History",
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey,
-                              ),
-                            ),
-                            Icon(
-                              Icons.arrow_forward_ios,
-                              size: 14,
+                ),
+                const SizedBox(height: 12),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.of(context)
+                        .push(
+                          MaterialPageRoute(
+                            builder: (context) => const ItemHistoryPage(),
+                          ),
+                        )
+                        .then((_) {
+                          setState(() {});
+                        });
+                  },
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 6.0),
+                      color: Colors.transparent,
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            "📜 Full Item History",
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
                               color: Colors.grey,
                             ),
-                          ],
-                        ),
+                          ),
+                          Icon(
+                            Icons.arrow_forward_ios,
+                            size: 14,
+                            color: Colors.grey,
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
-        body: IndexedStack(
-          index: _selectedIndex,
-          children: [_buildHomeTab(), _buildInventoryTab()],
-        ),
-        bottomNavigationBar: BottomNavigationBar(
-          currentIndex: _selectedIndex,
-          onTap: (index) {
-            setState(() {
-              _selectedIndex = index;
-            });
-          },
-          selectedItemColor: Colors.amber.shade900,
-          unselectedItemColor: Colors.grey,
-          items: const [
-            BottomNavigationBarItem(icon: Icon(Icons.home), label: "Home"),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.inventory_2),
-              label: "Inventory",
-            ),
-          ],
-        ),
+      ),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: [
+          _buildHomeTab(),
+          _buildTransactionLogsTab(),
+          _buildInventoryTab(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        type: BottomNavigationBarType.fixed,
+        onTap: (index) {
+          setState(() {
+            _selectedIndex = index;
+          });
+        },
+        selectedItemColor: Colors.amber.shade900,
+        unselectedItemColor: Colors.grey,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: "Home"),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.receipt_long),
+            label: "Logs",
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.inventory_2),
+            label: "Inventory",
+          ),
+        ],
       ),
     );
   }
@@ -964,165 +1566,6 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ],
-          const Divider(height: 24, thickness: 1),
-          GestureDetector(
-            onTap: () {
-              Navigator.of(context)
-                  .push(
-                    MaterialPageRoute(
-                      builder: (context) => const TransactionHistoryPage(),
-                    ),
-                  )
-                  .then((_) {
-                    setState(() {});
-                  });
-            },
-            child: MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                color: Colors.transparent,
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      "📜 Completed Transaction Logs",
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Icon(
-                      Icons.arrow_forward_ios,
-                      size: 14,
-                      color: Colors.black,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Expanded(
-            flex: 3,
-            child: FutureBuilder<List<Map<String, Object?>>>(
-              future: DBHelper.getSales(),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                final historyLogs = snapshot.data!;
-                if (historyLogs.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      "No transaction history records discovered yet.",
-                    ),
-                  );
-                }
-
-                final Map<String, List<Map<String, Object?>>> groupedLogs = {};
-
-                for (final sale in historyLogs) {
-                  final String rawDateStr = sale['saleDate']?.toString() ?? '';
-                  final String dateKey = rawDateStr.length >= 10
-                      ? rawDateStr.substring(0, 10)
-                      : "Unknown Date";
-
-                  groupedLogs.putIfAbsent(dateKey, () => []);
-                  groupedLogs[dateKey]!.add(sale);
-                }
-
-                final List<String> sortedDates = groupedLogs.keys.toList();
-
-                return ListView.builder(
-                  itemCount: sortedDates.length,
-                  itemBuilder: (context, dateIndex) {
-                    final String dateHeader = sortedDates[dateIndex];
-                    final List<Map<String, Object?>> dailySales =
-                        groupedLogs[dateHeader]!;
-
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 8.0,
-                            horizontal: 4.0,
-                          ),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade300,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              "📅 $dateHeader",
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey.shade800,
-                              ),
-                            ),
-                          ),
-                        ),
-                        ...dailySales.map((saleRecord) {
-                          final String saleDate =
-                              saleRecord['saleDate']?.toString() ?? '';
-                          final String timeDisplay = saleDate.length >= 16
-                              ? saleDate.substring(11, 16)
-                              : "00:00";
-
-                          final String type =
-                              saleRecord['type']?.toString() ?? '';
-                          final double price =
-                              (saleRecord['price'] as num?)?.toDouble() ?? 0.0;
-                          final int id =
-                              (saleRecord['id'] as num?)?.toInt() ?? 0;
-
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            child: ListTile(
-                              dense: true,
-                              leading: const Icon(
-                                Icons.receipt_long,
-                                color: Colors.green,
-                              ),
-                              title: Text(
-                                type,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              subtitle: Text(
-                                "Time: $timeDisplay",
-                                style: const TextStyle(fontSize: 11),
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    "${price.toStringAsFixed(0)} MMK",
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.green,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        }),
-                      ],
-                    );
-                  },
-                );
-              },
-            ),
-          ),
         ],
       ),
     );
@@ -1141,6 +1584,56 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           const SizedBox(height: 6),
+          if (_showInventoryPasswordBox && !_editUnlocked) ...[
+            Card(
+              color: Colors.amber.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: _inventoryPasswordController,
+                      obscureText: true,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: "Admin password",
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.lock),
+                      ),
+                      onSubmitted: (_) {
+                        _checkInventoryPassword();
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () {
+                              setState(() {
+                                _showInventoryPasswordBox = false;
+                                _inventoryPasswordController.clear();
+                              });
+                            },
+                            child: const Text("Cancel"),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _checkInventoryPassword,
+                            icon: const Icon(Icons.lock_open),
+                            label: const Text("Unlock"),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
           Expanded(
             child: FutureBuilder<List<Map<String, Object?>>>(
               future: DBHelper.getItems(),
@@ -1186,54 +1679,80 @@ class _HomePageState extends State<HomePage> {
                           ),
                         ),
                         subtitle: Text("ID: $barcode"),
-                        trailing: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 4,
+                        trailing: _editUnlocked
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: "Edit",
+                                    icon: const Icon(
+                                      Icons.edit,
+                                      color: Colors.blue,
+                                    ),
+                                    onPressed: () {
+                                      _showEditItemDialog(item);
+                                    },
+                                  ),
+                                  IconButton(
+                                    tooltip: "Delete",
+                                    icon: const Icon(
+                                      Icons.delete,
+                                      color: Colors.red,
+                                    ),
+                                    onPressed: () {
+                                      _confirmDeleteItem(item);
+                                    },
+                                  ),
+                                ],
+                              )
+                            : Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: trackStock == 1
+                                          ? (qty > 0
+                                                ? Colors.blue.shade50
+                                                : Colors.red.shade50)
+                                          : (saleEffect == -1
+                                                ? Colors.red.shade50
+                                                : Colors.orange.shade50),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Text(
+                                      trackStock == 1
+                                          ? "Stock: $qty"
+                                          : (saleEffect == -1
+                                                ? "Deduct"
+                                                : "Non-stock"),
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: trackStock == 1
+                                            ? (qty > 0
+                                                  ? Colors.blue.shade900
+                                                  : Colors.red)
+                                            : (saleEffect == -1
+                                                  ? Colors.red.shade900
+                                                  : Colors.orange.shade900),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    "${priceUnit.toStringAsFixed(0)} MMK / each",
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              decoration: BoxDecoration(
-                                color: trackStock == 1
-                                    ? (qty > 0
-                                          ? Colors.blue.shade50
-                                          : Colors.red.shade50)
-                                    : (saleEffect == -1
-                                          ? Colors.red.shade50
-                                          : Colors.orange.shade50),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                trackStock == 1
-                                    ? "Stock: $qty"
-                                    : (saleEffect == -1
-                                          ? "Deduct"
-                                          : "Non-stock"),
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: trackStock == 1
-                                      ? (qty > 0
-                                            ? Colors.blue.shade900
-                                            : Colors.red)
-                                      : (saleEffect == -1
-                                            ? Colors.red.shade900
-                                            : Colors.orange.shade900),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              "${priceUnit.toStringAsFixed(0)} MMK / each",
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Colors.grey.shade600,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
                       ),
                     );
                   },
