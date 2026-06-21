@@ -85,6 +85,25 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     return result;
   }
 
+  Map<String, double> _buildDailyAmountTotals(
+    List<Map<String, dynamic>> historyLogs,
+  ) {
+    final Map<String, double> result = {};
+
+    for (final sale in historyLogs) {
+      final String rawDateStr = sale['saleDate']?.toString() ?? '';
+      final String dateKey = rawDateStr.length >= 10
+          ? rawDateStr.substring(0, 10)
+          : 'Unknown Date';
+
+      final double price = (sale['price'] as num?)?.toDouble() ?? 0.0;
+
+      result[dateKey] = (result[dateKey] ?? 0.0) + price;
+    }
+
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -229,6 +248,9 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                       final dailyItemTotals = _buildDailyItemTotals(
                         historyLogs,
                       );
+                      final dailyAmountTotals = _buildDailyAmountTotals(
+                        historyLogs,
+                      );
 
                       final Map<String, List<Map<String, dynamic>>>
                       groupedLogs = {};
@@ -256,6 +278,8 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                             final String dateHeader = sortedDates[dateIndex];
                             final Map<String, int> itemTotals =
                                 dailyItemTotals[dateHeader] ?? {};
+                            final double dailyAmount =
+                                dailyAmountTotals[dateHeader] ?? 0.0;
 
                             final List<MapEntry<String, int>> entries =
                                 itemTotals.entries.toList()
@@ -331,7 +355,14 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                           final String dateHeader = sortedDates[dateIndex];
                           final List<Map<String, dynamic>> dailySales =
                               groupedLogs[dateHeader]!;
-
+                          final double dailyAmount = dailySales.fold<double>(
+                            0.0,
+                            (sum, sale) {
+                              final double price =
+                                  (sale['price'] as num?)?.toDouble() ?? 0.0;
+                              return sum + price;
+                            },
+                          );
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -349,13 +380,27 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                                     color: Colors.grey.shade300,
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(
-                                    "📅 $dateHeader",
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.grey.shade800,
-                                    ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        "📅 $dateHeader",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.orange.shade900,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Text(
+                                        "Total: ${dailyAmount.toStringAsFixed(0)} MMK",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.green.shade800,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
@@ -402,7 +447,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                                           ),
                                         ),
                                         const SizedBox(width: 4),
-                                      
                                       ],
                                     ),
                                   ),

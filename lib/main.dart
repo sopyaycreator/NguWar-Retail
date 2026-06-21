@@ -42,6 +42,10 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController _priceController = TextEditingController();
   final TextEditingController _barcodeController = TextEditingController();
   final TextEditingController _checkoutScanController = TextEditingController();
+  final TextEditingController _inventorySearchController =
+      TextEditingController();
+
+  String _inventorySearchText = "";
 
   final FocusNode _checkoutScanFocusNode = FocusNode();
   final List<Map<String, dynamic>> _activeCart = [];
@@ -87,6 +91,7 @@ class _HomePageState extends State<HomePage> {
     _checkoutScanFocusNode.dispose();
     _nameFocusNode.dispose();
     _inventoryPasswordController.dispose();
+    _inventorySearchController.dispose();
     super.dispose();
   }
 
@@ -562,7 +567,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _fillDrawerWithMatchedItem(Map<String, Object?> matched) {
+    _barcodeController.text = matched['barcode']?.toString() ?? '';
+
     _nameController.text = matched['name']?.toString() ?? '';
+
     _priceController.text = ((matched['priceUnit'] as num?)?.toDouble() ?? 0.0)
         .toStringAsFixed(0);
 
@@ -572,6 +580,7 @@ class _HomePageState extends State<HomePage> {
 
     _trackStock = trackStock == 1;
     _saleEffect = saleEffect;
+
     _quantityController.text = qty.toString();
   }
 
@@ -1092,6 +1101,8 @@ class _HomePageState extends State<HomePage> {
                     setState(() {
                       _fillDrawerWithMatchedItem(item);
                     });
+
+                    _nameFocusNode.unfocus();
                   },
 
                   fieldViewBuilder:
@@ -1571,8 +1582,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildInventoryTab() {
-    return Padding(
+ Widget _buildInventoryTab() {
+  return SafeArea(
+    top: false,
+    child: Padding(
       padding: const EdgeInsets.all(12.0),
       child: Column(
         children: [
@@ -1583,7 +1596,46 @@ class _HomePageState extends State<HomePage> {
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
           ),
-          const SizedBox(height: 6),
+
+          const SizedBox(height: 10),
+
+          // Search Bar
+          TextField(
+            controller: _inventorySearchController,
+            decoration: InputDecoration(
+              hintText: "Search by product name or barcode...",
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _inventorySearchText.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _inventorySearchController.clear();
+                        setState(() {
+                          _inventorySearchText = "";
+                        });
+                      },
+                    )
+                  : null,
+              filled: true,
+              fillColor: Colors.white,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            onChanged: (value) {
+              setState(() {
+                _inventorySearchText = value.trim().toLowerCase();
+              });
+            },
+          ),
+
+          const SizedBox(height: 10),
+
           if (_showInventoryPasswordBox && !_editUnlocked) ...[
             Card(
               color: Colors.amber.shade50,
@@ -1634,6 +1686,7 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 10),
           ],
+
           Expanded(
             child: FutureBuilder<List<Map<String, Object?>>>(
               future: DBHelper.getItems(),
@@ -1642,11 +1695,30 @@ class _HomePageState extends State<HomePage> {
                   return const Center(child: CircularProgressIndicator());
                 }
 
-                final storeItems = snapshot.data!;
-                if (storeItems.isEmpty) {
+                final allItems = snapshot.data!;
+
+                if (allItems.isEmpty) {
                   return const Center(
                     child: Text(
                       "No products stored in database. Add them in the drawer.",
+                    ),
+                  );
+                }
+
+                final storeItems = allItems.where((item) {
+                  final name = item['name']?.toString().toLowerCase() ?? '';
+                  final barcode =
+                      item['barcode']?.toString().toLowerCase() ?? '';
+
+                  return name.contains(_inventorySearchText) ||
+                      barcode.contains(_inventorySearchText);
+                }).toList();
+
+                if (storeItems.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      "No matching products found.",
+                      style: TextStyle(color: Colors.grey),
                     ),
                   );
                 }
@@ -1655,6 +1727,7 @@ class _HomePageState extends State<HomePage> {
                   itemCount: storeItems.length,
                   itemBuilder: (context, index) {
                     final item = storeItems[index];
+
                     final int trackStock =
                         (item['trackStock'] as num?)?.toInt() ?? 1;
                     final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
@@ -1717,28 +1790,28 @@ class _HomePageState extends State<HomePage> {
                                     decoration: BoxDecoration(
                                       color: trackStock == 1
                                           ? (qty > 0
-                                                ? Colors.blue.shade50
-                                                : Colors.red.shade50)
+                                              ? Colors.blue.shade50
+                                              : Colors.red.shade50)
                                           : (saleEffect == -1
-                                                ? Colors.red.shade50
-                                                : Colors.orange.shade50),
+                                              ? Colors.red.shade50
+                                              : Colors.orange.shade50),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: Text(
                                       trackStock == 1
                                           ? "Stock: $qty"
                                           : (saleEffect == -1
-                                                ? "Deduct"
-                                                : "Non-stock"),
+                                              ? "Deduct"
+                                              : "Non-stock"),
                                       style: TextStyle(
                                         fontWeight: FontWeight.bold,
                                         color: trackStock == 1
                                             ? (qty > 0
-                                                  ? Colors.blue.shade900
-                                                  : Colors.red)
+                                                ? Colors.blue.shade900
+                                                : Colors.red)
                                             : (saleEffect == -1
-                                                  ? Colors.red.shade900
-                                                  : Colors.orange.shade900),
+                                                ? Colors.red.shade900
+                                                : Colors.orange.shade900),
                                       ),
                                     ),
                                   ),
@@ -1762,6 +1835,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 }
