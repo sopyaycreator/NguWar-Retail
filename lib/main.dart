@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:nguwar/auth_service.dart';
 
 import 'package:nguwar/splash_screen.dart';
 import 'package:nguwar/transaction_history_page.dart';
 import 'db_helper.dart';
 import 'item_history_page.dart';
+import 'sync_service.dart';
 
 void main() {
   runApp(const MyApp());
@@ -36,6 +38,10 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  final SyncService _syncService = SyncService();
+
+  String get _currentBranch => AuthService.currentUser?.branchId ?? 'nguwar_1';
 
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _quantityController = TextEditingController();
@@ -69,6 +75,8 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _loadInventoryItems();
+    _syncService.startListening(branchId: _currentBranch);
+    _syncService.syncPending(branchId: _currentBranch);
   }
 
   Future<void> _loadInventoryItems() async {
@@ -83,6 +91,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _syncService.dispose();
     _nameController.dispose();
     _quantityController.dispose();
     _priceController.dispose();
@@ -92,6 +101,7 @@ class _HomePageState extends State<HomePage> {
     _nameFocusNode.dispose();
     _inventoryPasswordController.dispose();
     _inventorySearchController.dispose();
+
     super.dispose();
   }
 
@@ -106,21 +116,6 @@ class _HomePageState extends State<HomePage> {
       _saleEffect = 1;
     }
   }
-
-  // Future<void> _handleHardwareScanSubmit(String rawValue) async {
-  //   final String barcode = rawValue.trim();
-  //   if (barcode.isEmpty) {
-  //     _requestHardwareScannerFocus();
-  //     return;
-  //   }
-
-  //   await _handleProductScanned(context, barcode);
-
-  //   _checkoutScanController.clear();
-  //   if (_hardwareScannerMode) {
-  //     _requestHardwareScannerFocus();
-  //   }
-  // }
 
   void _requestHardwareScannerFocus() {
     Future.delayed(const Duration(milliseconds: 80), () {
@@ -183,7 +178,7 @@ class _HomePageState extends State<HomePage> {
         'priceUnit': double.tryParse(priceRaw) ?? 0.0,
         'trackStock': _trackStock ? 1 : 0,
         'saleEffect': _trackStock ? 1 : _saleEffect,
-      });
+      }, branchId: _currentBranch);
       await _loadInventoryItems();
 
       if (!mounted) return;
@@ -355,7 +350,7 @@ class _HomePageState extends State<HomePage> {
       'type': itemSummaries.join(", "),
       'price': orderGrandTotal,
       'saleDate': DateTime.now().toIso8601String(),
-    });
+    }, branchId: _currentBranch);
 
     setState(() {
       _activeCart.clear();
@@ -644,14 +639,7 @@ class _HomePageState extends State<HomePage> {
 
     if (confirmed != true) return;
 
-    await DBHelper.insertItemHistory(
-      itemName: name,
-      barcode: barcode,
-      action: "Deleted Item",
-      qty: qty,
-    );
-
-    await DBHelper.deleteItem(barcode);
+    await DBHelper.deleteItem(barcode, branchId: _currentBranch);
 
     if (!mounted) return;
 
@@ -879,9 +867,10 @@ class _HomePageState extends State<HomePage> {
       },
       backgroundColor: const Color(0xFFF6F6F6),
       appBar: AppBar(
+        // In your AppBar title:
         title: Text(
           _selectedIndex == 0
-              ? "🛒 Stock"
+              ? "🛒 ${AuthService.currentUser?.shopName ?? 'Stock'}"
               : _selectedIndex == 1
               ? "📜 Transaction Logs"
               : "📦 Inventory",
@@ -889,6 +878,28 @@ class _HomePageState extends State<HomePage> {
         centerTitle: true,
         backgroundColor: Colors.amber,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.sync, color: Colors.black87),
+            tooltip: 'Sync with Server',
+            onPressed: () async {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Syncing pending data...")),
+              );
+              bool success = await _syncService.syncPending(
+                branchId: _currentBranch,
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      success ? "✅ Sync Complete" : "❌ Sync Failed (Offline?)",
+                    ),
+                    backgroundColor: success ? Colors.green : Colors.red,
+                  ),
+                );
+              }
+            },
+          ),
           if (_selectedIndex == 0) ...[
             IconButton(
               icon: Icon(
@@ -1582,260 +1593,260 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
- Widget _buildInventoryTab() {
-  return SafeArea(
-    top: false,
-    child: Padding(
-      padding: const EdgeInsets.all(12.0),
-      child: Column(
-        children: [
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              "📦 Inventory",
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-          ),
-
-          const SizedBox(height: 10),
-
-          // Search Bar
-          TextField(
-            controller: _inventorySearchController,
-            decoration: InputDecoration(
-              hintText: "Search by product name or barcode...",
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _inventorySearchText.isNotEmpty
-                  ? IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        _inventorySearchController.clear();
-                        setState(() {
-                          _inventorySearchText = "";
-                        });
-                      },
-                    )
-                  : null,
-              filled: true,
-              fillColor: Colors.white,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
+  Widget _buildInventoryTab() {
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          children: [
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                "📦 Inventory",
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
-            onChanged: (value) {
-              setState(() {
-                _inventorySearchText = value.trim().toLowerCase();
-              });
-            },
-          ),
 
-          const SizedBox(height: 10),
+            const SizedBox(height: 10),
 
-          if (_showInventoryPasswordBox && !_editUnlocked) ...[
-            Card(
-              color: Colors.amber.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  children: [
-                    TextField(
-                      controller: _inventoryPasswordController,
-                      obscureText: true,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: "Admin password",
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.lock),
-                      ),
-                      onSubmitted: (_) {
-                        _checkInventoryPassword();
-                      },
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: () {
-                              setState(() {
-                                _showInventoryPasswordBox = false;
-                                _inventoryPasswordController.clear();
-                              });
-                            },
-                            child: const Text("Cancel"),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _checkInventoryPassword,
-                            icon: const Icon(Icons.lock_open),
-                            label: const Text("Unlock"),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+            // Search Bar
+            TextField(
+              controller: _inventorySearchController,
+              decoration: InputDecoration(
+                hintText: "Search by product name or barcode...",
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _inventorySearchText.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _inventorySearchController.clear();
+                          setState(() {
+                            _inventorySearchText = "";
+                          });
+                        },
+                      )
+                    : null,
+                filled: true,
+                fillColor: Colors.white,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-          ],
-
-          Expanded(
-            child: FutureBuilder<List<Map<String, Object?>>>(
-              future: DBHelper.getItems(),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                final allItems = snapshot.data!;
-
-                if (allItems.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      "No products stored in database. Add them in the drawer.",
-                    ),
-                  );
-                }
-
-                final storeItems = allItems.where((item) {
-                  final name = item['name']?.toString().toLowerCase() ?? '';
-                  final barcode =
-                      item['barcode']?.toString().toLowerCase() ?? '';
-
-                  return name.contains(_inventorySearchText) ||
-                      barcode.contains(_inventorySearchText);
-                }).toList();
-
-                if (storeItems.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      "No matching products found.",
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  );
-                }
-
-                return ListView.builder(
-                  itemCount: storeItems.length,
-                  itemBuilder: (context, index) {
-                    final item = storeItems[index];
-
-                    final int trackStock =
-                        (item['trackStock'] as num?)?.toInt() ?? 1;
-                    final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
-                    final int saleEffect =
-                        (item['saleEffect'] as num?)?.toInt() ?? 1;
-                    final double priceUnit =
-                        (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
-                    final String name =
-                        item['name']?.toString() ?? 'Unknown Item';
-                    final String barcode = item['barcode']?.toString() ?? '-';
-
-                    return Card(
-                      color: Colors.white,
-                      elevation: 0.5,
-                      child: ListTile(
-                        dense: true,
-                        title: Text(
-                          name,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                          ),
-                        ),
-                        subtitle: Text("ID: $barcode"),
-                        trailing: _editUnlocked
-                            ? Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    tooltip: "Edit",
-                                    icon: const Icon(
-                                      Icons.edit,
-                                      color: Colors.blue,
-                                    ),
-                                    onPressed: () {
-                                      _showEditItemDialog(item);
-                                    },
-                                  ),
-                                  IconButton(
-                                    tooltip: "Delete",
-                                    icon: const Icon(
-                                      Icons.delete,
-                                      color: Colors.red,
-                                    ),
-                                    onPressed: () {
-                                      _confirmDeleteItem(item);
-                                    },
-                                  ),
-                                ],
-                              )
-                            : Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: trackStock == 1
-                                          ? (qty > 0
-                                              ? Colors.blue.shade50
-                                              : Colors.red.shade50)
-                                          : (saleEffect == -1
-                                              ? Colors.red.shade50
-                                              : Colors.orange.shade50),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      trackStock == 1
-                                          ? "Stock: $qty"
-                                          : (saleEffect == -1
-                                              ? "Deduct"
-                                              : "Non-stock"),
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color: trackStock == 1
-                                            ? (qty > 0
-                                                ? Colors.blue.shade900
-                                                : Colors.red)
-                                            : (saleEffect == -1
-                                                ? Colors.red.shade900
-                                                : Colors.orange.shade900),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    "${priceUnit.toStringAsFixed(0)} MMK / each",
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.grey.shade600,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                      ),
-                    );
-                  },
-                );
+              onChanged: (value) {
+                setState(() {
+                  _inventorySearchText = value.trim().toLowerCase();
+                });
               },
             ),
-          ),
-        ],
+
+            const SizedBox(height: 10),
+
+            if (_showInventoryPasswordBox && !_editUnlocked) ...[
+              Card(
+                color: Colors.amber.shade50,
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _inventoryPasswordController,
+                        obscureText: true,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: "Admin password",
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.lock),
+                        ),
+                        onSubmitted: (_) {
+                          _checkInventoryPassword();
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () {
+                                setState(() {
+                                  _showInventoryPasswordBox = false;
+                                  _inventoryPasswordController.clear();
+                                });
+                              },
+                              child: const Text("Cancel"),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _checkInventoryPassword,
+                              icon: const Icon(Icons.lock_open),
+                              label: const Text("Unlock"),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+            ],
+
+            Expanded(
+              child: FutureBuilder<List<Map<String, Object?>>>(
+                future: DBHelper.getItems(),
+                builder: (context, snapshot) {
+                  if (!snapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  final allItems = snapshot.data!;
+
+                  if (allItems.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        "No products stored in database. Add them in the drawer.",
+                      ),
+                    );
+                  }
+
+                  final storeItems = allItems.where((item) {
+                    final name = item['name']?.toString().toLowerCase() ?? '';
+                    final barcode =
+                        item['barcode']?.toString().toLowerCase() ?? '';
+
+                    return name.contains(_inventorySearchText) ||
+                        barcode.contains(_inventorySearchText);
+                  }).toList();
+
+                  if (storeItems.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        "No matching products found.",
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    );
+                  }
+
+                  return ListView.builder(
+                    itemCount: storeItems.length,
+                    itemBuilder: (context, index) {
+                      final item = storeItems[index];
+
+                      final int trackStock =
+                          (item['trackStock'] as num?)?.toInt() ?? 1;
+                      final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
+                      final int saleEffect =
+                          (item['saleEffect'] as num?)?.toInt() ?? 1;
+                      final double priceUnit =
+                          (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
+                      final String name =
+                          item['name']?.toString() ?? 'Unknown Item';
+                      final String barcode = item['barcode']?.toString() ?? '-';
+
+                      return Card(
+                        color: Colors.white,
+                        elevation: 0.5,
+                        child: ListTile(
+                          dense: true,
+                          title: Text(
+                            name,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          subtitle: Text("ID: $barcode"),
+                          trailing: _editUnlocked
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      tooltip: "Edit",
+                                      icon: const Icon(
+                                        Icons.edit,
+                                        color: Colors.blue,
+                                      ),
+                                      onPressed: () {
+                                        _showEditItemDialog(item);
+                                      },
+                                    ),
+                                    IconButton(
+                                      tooltip: "Delete",
+                                      icon: const Icon(
+                                        Icons.delete,
+                                        color: Colors.red,
+                                      ),
+                                      onPressed: () {
+                                        _confirmDeleteItem(item);
+                                      },
+                                    ),
+                                  ],
+                                )
+                              : Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 4,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: trackStock == 1
+                                            ? (qty > 0
+                                                  ? Colors.blue.shade50
+                                                  : Colors.red.shade50)
+                                            : (saleEffect == -1
+                                                  ? Colors.red.shade50
+                                                  : Colors.orange.shade50),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Text(
+                                        trackStock == 1
+                                            ? "Stock: $qty"
+                                            : (saleEffect == -1
+                                                  ? "Deduct"
+                                                  : "Non-stock"),
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: trackStock == 1
+                                              ? (qty > 0
+                                                    ? Colors.blue.shade900
+                                                    : Colors.red)
+                                              : (saleEffect == -1
+                                                    ? Colors.red.shade900
+                                                    : Colors.orange.shade900),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      "${priceUnit.toStringAsFixed(0)} MMK / each",
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade600,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
 }
