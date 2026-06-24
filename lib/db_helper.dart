@@ -6,7 +6,7 @@ import 'package:sqflite/sqflite.dart';
 class DBHelper {
   static Database? _db;
 
-  static const int _dbVersion = 5;
+  static const int _dbVersion = 7;
   static const String defaultBranchId = 'nguwar_1';
 
   static Future<Database> get database async {
@@ -47,6 +47,20 @@ class DBHelper {
             )
           ''');
         }
+        if (oldVersion < 6) {
+          try {
+            await db.execute(
+              'ALTER TABLE sales ADD COLUMN serverId INTEGER UNIQUE',
+            );
+          } catch (_) {}
+        }
+        if (oldVersion < 7) {
+          try {
+            await db.execute(
+              'ALTER TABLE item_history ADD COLUMN serverId INTEGER UNIQUE',
+            );
+          } catch (_) {}
+        }
       },
     );
 
@@ -68,6 +82,7 @@ class DBHelper {
     await db.execute('''
       CREATE TABLE sales(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        serverId INTEGER UNIQUE,
         type TEXT,
         price REAL,
         saleDate TEXT
@@ -77,6 +92,7 @@ class DBHelper {
     await db.execute('''
       CREATE TABLE item_history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        serverId INTEGER UNIQUE,
         itemName TEXT,
         barcode TEXT,
         action TEXT,
@@ -239,18 +255,14 @@ class DBHelper {
         action = 'Updated Item';
         historyQty = incomingQty;
       } else {
-        await txn.insert(
-          'items',
-          {
-            'barcode': barcode,
-            'name': name,
-            'quantity': trackStock == 1 ? incomingQty : 0,
-            'priceUnit': priceUnit,
-            'trackStock': trackStock,
-            'saleEffect': saleEffect,
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        await txn.insert('items', {
+          'barcode': barcode,
+          'name': name,
+          'quantity': trackStock == 1 ? incomingQty : 0,
+          'priceUnit': priceUnit,
+          'trackStock': trackStock,
+          'saleEffect': saleEffect,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
 
         action = 'Added Item';
         historyQty = incomingQty;
@@ -271,7 +283,6 @@ class DBHelper {
         entityType: 'item',
         operation: 'upsert',
         payload: {
-          
           'barcode': barcode,
           'name': name,
           'quantity': incomingQty,
@@ -361,20 +372,23 @@ class DBHelper {
 
     await db.update(
       'items',
-      {
-        'quantity': newQty,
-      },
+      {'quantity': newQty},
       where: 'barcode = ?',
       whereArgs: [barcode],
     );
 
+    // FIXED: Send the COMPLETE item payload to the sync queue!
     await _insertSyncQueue(
       db,
       entityType: 'item',
       operation: 'quantity_update',
       payload: {
         'barcode': barcode,
-        'newQty': newQty,
+        'name': item['name']?.toString() ?? '',
+        'quantity': newQty,
+        'priceUnit': (item['priceUnit'] as num?)?.toDouble() ?? 0.0,
+        'trackStock': trackStock,
+        'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
       },
       branchId: branchId,
     );
@@ -515,6 +529,69 @@ class DBHelper {
     );
   }
 
+  // Upsert item from server (no sync queue — data already on server)
+  static Future<void> upsertItemFromServer(Map<String, dynamic> item) async {
+    final db = await database;
+    final String barcode = item['barcode']?.toString() ?? '';
+    final existing = await getItemByBarcode(barcode);
+
+    if (existing != null) {
+      // ✅ Item already exists locally — only update name/price/settings
+      // NEVER overwrite quantity from server (local is more accurate)
+      await db.update(
+        'items',
+        {
+          'name': item['name']?.toString() ?? '',
+          'priceUnit':
+              double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
+          'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
+          'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
+        },
+        where: 'barcode = ?',
+        whereArgs: [barcode],
+      );
+    } else {
+      // ✅ New item — insert everything including quantity
+      await db.insert('items', {
+        'barcode': barcode,
+        'name': item['name']?.toString() ?? '',
+        'quantity': (item['quantity'] as num?)?.toInt() ?? 0,
+        'priceUnit':
+            double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
+        'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
+        'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+  }
+
+  static Future<void> upsertHistoryFromServer(Map<String, dynamic> h) async {
+    final db = await database;
+    await db.insert('item_history', {
+      'serverId':  h['id'], 
+      'itemName': h['itemName']?.toString() ?? '',
+      'barcode': h['barcode']?.toString() ?? '',
+      'action': h['action']?.toString() ?? '',
+      'qty': (h['qty'] as num?)?.toInt() ?? 0,
+      'createdAt': h['createdAt']?.toString() ?? '',
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  // Upsert sale from server (no sync queue — data already on server)
+  static Future<void> upsertSaleFromServer(Map<String, dynamic> sale) async {
+    final db = await database;
+    await db.insert(
+      'sales',
+      {
+        'serverId': sale['id'],
+        'type': sale['type']?.toString() ?? '',
+        'price': double.tryParse(sale['price']?.toString() ?? '0') ?? 0.0,
+        'saleDate': sale['saleDate']?.toString() ?? '',
+      },
+      conflictAlgorithm:
+          ConflictAlgorithm.ignore, // don't duplicate existing sales
+    );
+  }
+
   static Future<List<Map<String, Object?>>> getSales() async {
     final db = await database;
     return db.query('sales', orderBy: 'saleDate DESC');
@@ -530,5 +607,14 @@ class DBHelper {
       await _db!.close();
       _db = null;
     }
+  }
+    static Future<void> clearLocalData() async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('items');
+      await txn.delete('sales');
+      await txn.delete('item_history');
+      await txn.delete('sync_queue');
+    });
   }
 }

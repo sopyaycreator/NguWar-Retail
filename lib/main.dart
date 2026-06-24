@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:nguwar/auth_service.dart';
+import 'package:nguwar/login_screen.dart';
 
 import 'package:nguwar/splash_screen.dart';
 import 'package:nguwar/transaction_history_page.dart';
@@ -77,6 +78,19 @@ class _HomePageState extends State<HomePage> {
     _loadInventoryItems();
     _syncService.startListening(branchId: _currentBranch);
     _syncService.syncPending(branchId: _currentBranch);
+    // In HomePage initState — push first, THEN pull
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Step 1: push local changes up first
+      await _syncService.syncPending(branchId: _currentBranch);
+      // Step 2: pull clean server state down
+      final pulled = await _syncService.pullFromServer(
+        branchId: _currentBranch,
+      );
+      if (pulled && mounted) {
+        await _loadInventoryItems();
+        setState(() {});
+      }
+    });
   }
 
   Future<void> _loadInventoryItems() async {
@@ -338,7 +352,11 @@ class _HomePageState extends State<HomePage> {
           // Allow negative stock
           final int absoluteNewStock = originalStock - purchaseQty;
 
-          await DBHelper.updateItemQuantity(barcode, absoluteNewStock);
+          await DBHelper.updateItemQuantity(
+            barcode,
+            absoluteNewStock,
+            branchId: _currentBranch,
+          );
         }
 
         itemSummaries.add("${purchaseQty}x $name");
@@ -355,6 +373,10 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _activeCart.clear();
     });
+    await _syncService.syncPending(
+      branchId: _currentBranch,
+    ); // push new stock to server
+    await _loadInventoryItems();
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -608,46 +630,42 @@ class _HomePageState extends State<HomePage> {
   Future<void> _confirmDeleteItem(Map<String, Object?> item) async {
     final String barcode = item['barcode']?.toString() ?? '';
     final String name = item['name']?.toString() ?? 'Unknown Item';
-    final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
 
     final bool? confirmed = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text("Delete Item"),
-          content: Text(
-            "Are you sure you want to delete this item?\n\n$name\nBarcode: $barcode",
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Delete Item"),
+        content: Text("Are you sure you want to delete \"$name\"?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("Cancel"),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text("Cancel"),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
             ),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              icon: const Icon(Icons.delete),
-              label: const Text("Delete"),
-            ),
-          ],
-        );
-      },
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            icon: const Icon(Icons.delete),
+            label: const Text("Delete"),
+          ),
+        ],
+      ),
     );
 
     if (confirmed != true) return;
 
     await DBHelper.deleteItem(barcode, branchId: _currentBranch);
+    await _loadInventoryItems(); // ← refresh UI immediately
+
+    // Immediately push delete to server
+    await _syncService.syncPending(branchId: _currentBranch);
 
     if (!mounted) return;
-
-    setState(() {});
-
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text("🗑️ Item deleted successfully"),
+        content: Text("Item deleted successfully"),
         backgroundColor: Colors.red,
       ),
     );
@@ -799,6 +817,7 @@ class _HomePageState extends State<HomePage> {
                         priceUnit: price,
                         trackStock: trackStock ? 1 : 0,
                         saleEffect: trackStock ? 1 : saleEffect,
+                        branchId: _currentBranch,
                       );
 
                       await Future.delayed(const Duration(milliseconds: 100));
@@ -837,16 +856,17 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
 
     if (saved == true) {
+      await _loadInventoryItems(); // ← refresh list
+      await _syncService.syncPending(
+        branchId: _currentBranch,
+      ); // ← push to server
+
       if (!mounted) return;
-
-      setState(() {});
-
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-
-        ScaffoldMessenger.of(this.context).showSnackBar(
+        ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("✅ Item updated successfully"),
+            content: Text("Item updated successfully"),
             backgroundColor: Colors.green,
           ),
         );
@@ -1218,14 +1238,13 @@ class _HomePageState extends State<HomePage> {
                     icon: const Icon(Icons.save, color: Colors.black),
                     label: const Text(
                       "Save Item Data",
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.black,
-                      ),
+                      style: TextStyle(color: Colors.black),
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
+
+                // ── PROFILE SECTION ──
+                const Divider(height: 20),
                 GestureDetector(
                   onTap: () {
                     Navigator.of(context)
@@ -1234,33 +1253,103 @@ class _HomePageState extends State<HomePage> {
                             builder: (context) => const ItemHistoryPage(),
                           ),
                         )
-                        .then((_) {
-                          setState(() {});
-                        });
+                        .then((_) => setState(() {}));
                   },
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 6.0),
-                      color: Colors.transparent,
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            "📜 Full Item History",
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.grey,
-                            ),
-                          ),
-                          Icon(
-                            Icons.arrow_forward_ios,
-                            size: 14,
+                  child: Container(
+                    width: double.infinity, // ✅ constrain width
+                    padding: const EdgeInsets.symmetric(vertical: 6.0),
+                    color: Colors.transparent,
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          "📜 Full Item History",
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
                             color: Colors.grey,
                           ),
-                        ],
+                        ),
+                        Icon(
+                          Icons.arrow_forward_ios,
+                          size: 14,
+                          color: Colors.grey,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const Divider(height: 20),
+                // Shop profile card
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.amber.shade200),
+                  ),
+                  child: Row(
+                    children: [
+                      const CircleAvatar(
+                        backgroundColor: Colors.amber,
+                        radius: 24,
+                        child: Icon(Icons.store, color: Colors.white, size: 24),
                       ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              AuthService.currentShopName ?? 'My Shop',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(
+                              '@${AuthService.currentUsername ?? ''}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // Switch Account button
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      // Close the drawer first
+                      Navigator.of(context).pop();
+                      await DBHelper.clearLocalData();
+                      // Log out
+                      await AuthService.logout();
+                      if (context.mounted) {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const LoginScreen(
+                              canPop: true,
+                            ), // ← canPop: true
+                          ),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.switch_account, color: Colors.amber),
+                    label: const Text(
+                      'Switch Account',
+                      style: TextStyle(color: Colors.black),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.amber),
                     ),
                   ),
                 ),
@@ -1607,10 +1696,7 @@ class _HomePageState extends State<HomePage> {
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
-
             const SizedBox(height: 10),
-
-            // Search Bar
             TextField(
               controller: _inventorySearchController,
               decoration: InputDecoration(
@@ -1621,9 +1707,7 @@ class _HomePageState extends State<HomePage> {
                         icon: const Icon(Icons.clear),
                         onPressed: () {
                           _inventorySearchController.clear();
-                          setState(() {
-                            _inventorySearchText = "";
-                          });
+                          setState(() => _inventorySearchText = "");
                         },
                       )
                     : null,
@@ -1638,15 +1722,11 @@ class _HomePageState extends State<HomePage> {
                   borderSide: BorderSide.none,
                 ),
               ),
-              onChanged: (value) {
-                setState(() {
-                  _inventorySearchText = value.trim().toLowerCase();
-                });
-              },
+              onChanged: (value) => setState(
+                () => _inventorySearchText = value.trim().toLowerCase(),
+              ),
             ),
-
             const SizedBox(height: 10),
-
             if (_showInventoryPasswordBox && !_editUnlocked) ...[
               Card(
                 color: Colors.amber.shade50,
@@ -1663,21 +1743,17 @@ class _HomePageState extends State<HomePage> {
                           border: OutlineInputBorder(),
                           prefixIcon: Icon(Icons.lock),
                         ),
-                        onSubmitted: (_) {
-                          _checkInventoryPassword();
-                        },
+                        onSubmitted: (_) => _checkInventoryPassword(),
                       ),
                       const SizedBox(height: 10),
                       Row(
                         children: [
                           Expanded(
                             child: OutlinedButton(
-                              onPressed: () {
-                                setState(() {
-                                  _showInventoryPasswordBox = false;
-                                  _inventoryPasswordController.clear();
-                                });
-                              },
+                              onPressed: () => setState(() {
+                                _showInventoryPasswordBox = false;
+                                _inventoryPasswordController.clear();
+                              }),
                               child: const Text("Cancel"),
                             ),
                           ),
@@ -1697,152 +1773,151 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 10),
             ],
-
             Expanded(
-              child: FutureBuilder<List<Map<String, Object?>>>(
-                future: DBHelper.getItems(),
-                builder: (context, snapshot) {
-                  if (!snapshot.hasData) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-
-                  final allItems = snapshot.data!;
-
-                  if (allItems.isEmpty) {
-                    return const Center(
+              child: _inventoryItems.isEmpty
+                  ? const Center(
                       child: Text(
                         "No products stored in database. Add them in the drawer.",
                       ),
-                    );
-                  }
+                    )
+                  : Builder(
+                      builder: (_) {
+                        final storeItems = _inventoryItems.where((item) {
+                          final name =
+                              item['name']?.toString().toLowerCase() ?? '';
+                          final barcode =
+                              item['barcode']?.toString().toLowerCase() ?? '';
+                          return name.contains(_inventorySearchText) ||
+                              barcode.contains(_inventorySearchText);
+                        }).toList();
 
-                  final storeItems = allItems.where((item) {
-                    final name = item['name']?.toString().toLowerCase() ?? '';
-                    final barcode =
-                        item['barcode']?.toString().toLowerCase() ?? '';
-
-                    return name.contains(_inventorySearchText) ||
-                        barcode.contains(_inventorySearchText);
-                  }).toList();
-
-                  if (storeItems.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        "No matching products found.",
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    );
-                  }
-
-                  return ListView.builder(
-                    itemCount: storeItems.length,
-                    itemBuilder: (context, index) {
-                      final item = storeItems[index];
-
-                      final int trackStock =
-                          (item['trackStock'] as num?)?.toInt() ?? 1;
-                      final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
-                      final int saleEffect =
-                          (item['saleEffect'] as num?)?.toInt() ?? 1;
-                      final double priceUnit =
-                          (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
-                      final String name =
-                          item['name']?.toString() ?? 'Unknown Item';
-                      final String barcode = item['barcode']?.toString() ?? '-';
-
-                      return Card(
-                        color: Colors.white,
-                        elevation: 0.5,
-                        child: ListTile(
-                          dense: true,
-                          title: Text(
-                            name,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
+                        if (storeItems.isEmpty) {
+                          return const Center(
+                            child: Text(
+                              "No matching products found.",
+                              style: TextStyle(color: Colors.grey),
                             ),
-                          ),
-                          subtitle: Text("ID: $barcode"),
-                          trailing: _editUnlocked
-                              ? Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                      tooltip: "Edit",
-                                      icon: const Icon(
-                                        Icons.edit,
-                                        color: Colors.blue,
-                                      ),
-                                      onPressed: () {
-                                        _showEditItemDialog(item);
-                                      },
-                                    ),
-                                    IconButton(
-                                      tooltip: "Delete",
-                                      icon: const Icon(
-                                        Icons.delete,
-                                        color: Colors.red,
-                                      ),
-                                      onPressed: () {
-                                        _confirmDeleteItem(item);
-                                      },
-                                    ),
-                                  ],
-                                )
-                              : Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 4,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: trackStock == 1
-                                            ? (qty > 0
-                                                  ? Colors.blue.shade50
-                                                  : Colors.red.shade50)
-                                            : (saleEffect == -1
-                                                  ? Colors.red.shade50
-                                                  : Colors.orange.shade50),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Text(
-                                        trackStock == 1
-                                            ? "Stock: $qty"
-                                            : (saleEffect == -1
-                                                  ? "Deduct"
-                                                  : "Non-stock"),
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: trackStock == 1
-                                              ? (qty > 0
-                                                    ? Colors.blue.shade900
-                                                    : Colors.red)
-                                              : (saleEffect == -1
-                                                    ? Colors.red.shade900
-                                                    : Colors.orange.shade900),
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      "${priceUnit.toStringAsFixed(0)} MMK / each",
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: Colors.grey.shade600,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
+                          );
+                        }
+
+                        return ListView.builder(
+                          itemCount: storeItems.length,
+                          itemBuilder: (context, index) {
+                            final item = storeItems[index];
+                            final int trackStock =
+                                (item['trackStock'] as num?)?.toInt() ?? 1;
+                            final int qty =
+                                (item['quantity'] as num?)?.toInt() ?? 0;
+                            final int saleEffect =
+                                (item['saleEffect'] as num?)?.toInt() ?? 1;
+                            final double priceUnit =
+                                double.tryParse(
+                                  item['priceUnit']?.toString() ?? '0',
+                                ) ??
+                                0.0;
+                            final String name =
+                                item['name']?.toString() ?? 'Unknown Item';
+                            final String barcode =
+                                item['barcode']?.toString() ?? '-';
+
+                            return Card(
+                              color: Colors.white,
+                              elevation: 0.5,
+                              child: ListTile(
+                                dense: true,
+                                title: Text(
+                                  name,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
                                 ),
-                        ),
-                      );
-                    },
-                  );
-                },
-              ),
+                                subtitle: Text("ID: $barcode"),
+                                trailing: _editUnlocked
+                                    ? Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            tooltip: "Edit",
+                                            icon: const Icon(
+                                              Icons.edit,
+                                              color: Colors.blue,
+                                            ),
+                                            onPressed: () =>
+                                                _showEditItemDialog(item),
+                                          ),
+                                          IconButton(
+                                            tooltip: "Delete",
+                                            icon: const Icon(
+                                              Icons.delete,
+                                              color: Colors.red,
+                                            ),
+                                            onPressed: () =>
+                                                _confirmDeleteItem(item),
+                                          ),
+                                        ],
+                                      )
+                                    : Column(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.end,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: trackStock == 1
+                                                  ? (qty > 0
+                                                        ? Colors.blue.shade50
+                                                        : Colors.red.shade50)
+                                                  : (saleEffect == -1
+                                                        ? Colors.red.shade50
+                                                        : Colors
+                                                              .orange
+                                                              .shade50),
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                            ),
+                                            child: Text(
+                                              trackStock == 1
+                                                  ? "Stock: $qty"
+                                                  : (saleEffect == -1
+                                                        ? "Deduct"
+                                                        : "Non-stock"),
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.bold,
+                                                color: trackStock == 1
+                                                    ? (qty > 0
+                                                          ? Colors.blue.shade900
+                                                          : Colors.red)
+                                                    : (saleEffect == -1
+                                                          ? Colors.red.shade900
+                                                          : Colors
+                                                                .orange
+                                                                .shade900),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            "${priceUnit.toStringAsFixed(0)} MMK / each",
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              color: Colors.grey.shade600,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
             ),
           ],
         ),
