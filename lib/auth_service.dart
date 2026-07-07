@@ -68,7 +68,7 @@ class AuthService {
         Uri.parse('$_baseUrl/api/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'username': username, 'password': password}),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 30));
 
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body);
@@ -104,7 +104,7 @@ class AuthService {
           'password': password,
           'shopName': shopName,
         }),
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 30));
 
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body);

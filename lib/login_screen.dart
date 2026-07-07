@@ -3,9 +3,7 @@ import 'auth_service.dart';
 import 'main.dart';
 
 class LoginScreen extends StatefulWidget {
-  final bool
-  canPop; // ← true = show back button (switch account), false = no back button (first launch)
-  const LoginScreen({super.key, this.canPop = false});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -43,7 +41,6 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   Future<void> _login() async {
-    // ✅ Clean the username exactly like the server does
     final rawUsername = _loginUsernameCtrl.text.trim();
     final username = rawUsername.toLowerCase().replaceAll(
       RegExp(r'[^a-z0-9_]'),
@@ -89,7 +86,6 @@ class _LoginScreenState extends State<LoginScreen>
     setState(() => _isLoading = false);
 
     if (user != null && mounted) {
-      // ✅ Show the actual saved username before proceeding
       await showDialog(
         context: context,
         barrierDismissible: false,
@@ -162,17 +158,14 @@ class _LoginScreenState extends State<LoginScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF6F6F6),
-      // ✅ Show back button only if canPop is true
-      appBar: widget.canPop
-          ? AppBar(
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              leading: IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.black),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-            )
-          : null,
+
+      appBar: AppBar(
+         automaticallyImplyLeading: false, 
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+       
+      ),
+
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(

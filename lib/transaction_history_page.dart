@@ -12,9 +12,110 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
   final GlobalKey<RefreshIndicatorState> _refreshKey =
       GlobalKey<RefreshIndicatorState>();
 
+  final ScrollController _scrollController = ScrollController();
+
+  static const int _pageSize = 50;
+
+  final List<Map<String, dynamic>> _historyLogs = [];
+
   bool _showDailyItemTotals = false;
+  bool _isInitialLoading = true;
+  bool _isLoadingMore = false;
+  bool _hasMoreData = true;
+
+  int _offset = 0;
+
   DateTime? _selectedFilterDate;
   String? _selectedFilterDateText;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _loadInitialSales();
+
+    _scrollController.addListener(() {
+      if (_scrollController.position.pixels >=
+          _scrollController.position.maxScrollExtent - 200) {
+        _loadMoreSales();
+      }
+    });
+  }
+
+  Future<void> _loadInitialSales() async {
+    setState(() {
+      _isInitialLoading = true;
+      _isLoadingMore = false;
+      _hasMoreData = true;
+      _offset = 0;
+      _historyLogs.clear();
+    });
+
+    try {
+      final List<Map<String, dynamic>> firstPage =
+          await DBHelper.getSalesPaginated(
+        limit: _pageSize,
+        offset: _offset,
+        saleDate: _selectedFilterDateText,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _historyLogs.addAll(firstPage);
+        _offset += firstPage.length;
+        _hasMoreData = firstPage.length == _pageSize;
+        _isInitialLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _isInitialLoading = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to load transactions: $e")),
+      );
+    }
+  }
+
+  Future<void> _loadMoreSales() async {
+    if (_isLoadingMore || !_hasMoreData || _isInitialLoading) return;
+
+    setState(() {
+      _isLoadingMore = true;
+    });
+
+    try {
+      final List<Map<String, dynamic>> nextPage =
+          await DBHelper.getSalesPaginated(
+        limit: _pageSize,
+        offset: _offset,
+        saleDate: _selectedFilterDateText,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _historyLogs.addAll(nextPage);
+        _offset += nextPage.length;
+        _hasMoreData = nextPage.length == _pageSize;
+        _isLoadingMore = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _isLoadingMore = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to load more transactions: $e")),
+      );
+    }
+  }
+
   Future<void> _pickFilterDate() async {
     final DateTime now = DateTime.now();
 
@@ -37,20 +138,17 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       _selectedFilterDate = picked;
       _selectedFilterDateText = formatted;
     });
+
+    await _loadInitialSales();
   }
 
-  void _clearFilterDate() {
+  Future<void> _clearFilterDate() async {
     setState(() {
       _selectedFilterDate = null;
       _selectedFilterDateText = null;
     });
-  }
 
-  String _extractDateKey(String rawDateStr) {
-    if (rawDateStr.length >= 10) {
-      return rawDateStr.substring(0, 10);
-    }
-    return '';
+    await _loadInitialSales();
   }
 
   Map<String, Map<String, int>> _buildDailyItemTotals(
@@ -77,7 +175,8 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
           final int qty = int.tryParse(match.group(1) ?? '0') ?? 0;
           final String itemName = match.group(2)?.trim() ?? 'Unknown Item';
 
-          result[dateKey]![itemName] = (result[dateKey]![itemName] ?? 0) + qty;
+          result[dateKey]![itemName] =
+              (result[dateKey]![itemName] ?? 0) + qty;
         }
       }
     }
@@ -102,6 +201,270 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     }
 
     return result;
+  }
+
+  Map<String, List<Map<String, dynamic>>> _groupLogsByDate(
+    List<Map<String, dynamic>> historyLogs,
+  ) {
+    final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
+
+    for (final sale in historyLogs) {
+      final String rawDateStr = sale['saleDate']?.toString() ?? '';
+      final String dateKey = rawDateStr.length >= 10
+          ? rawDateStr.substring(0, 10)
+          : "Unknown Date";
+
+      groupedLogs.putIfAbsent(dateKey, () => []);
+      groupedLogs[dateKey]!.add(sale);
+    }
+
+    return groupedLogs;
+  }
+
+  Widget _buildBottomLoader() {
+    if (_isLoadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (!_hasMoreData && _historyLogs.isNotEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: Text(
+            "No more transaction records.",
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  Widget _buildDailyItemTotalsView() {
+    final dailyItemTotals = _buildDailyItemTotals(_historyLogs);
+    final dailyAmountTotals = _buildDailyAmountTotals(_historyLogs);
+
+    final List<String> sortedDates = dailyItemTotals.keys.toList()
+      ..sort((a, b) => b.compareTo(a));
+
+    return ListView.builder(
+      controller: _scrollController,
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: sortedDates.length + 1,
+      itemBuilder: (context, dateIndex) {
+        if (dateIndex == sortedDates.length) {
+          return _buildBottomLoader();
+        }
+
+        final String dateHeader = sortedDates[dateIndex];
+        final Map<String, int> itemTotals = dailyItemTotals[dateHeader] ?? {};
+        final double dailyAmount = dailyAmountTotals[dateHeader] ?? 0.0;
+
+        final List<MapEntry<String, int>> entries = itemTotals.entries.toList()
+          ..sort((a, b) => b.value.compareTo(a.value));
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                vertical: 8.0,
+                horizontal: 4.0,
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade100,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      "📅 $dateHeader",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange.shade900,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      "Loaded total: ${dailyAmount.toStringAsFixed(0)} MMK",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            ...entries.map((entry) {
+              return Card(
+                color: Colors.white,
+                elevation: 0.5,
+                margin: const EdgeInsets.only(bottom: 6),
+                child: ListTile(
+                  dense: true,
+                  leading: const Icon(
+                    Icons.inventory_2,
+                    color: Colors.orange,
+                  ),
+                  title: Text(
+                    entry.key,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  trailing: Text(
+                    "${entry.value} pcs",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.deepOrange,
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildFullArchiveView() {
+    final Map<String, List<Map<String, dynamic>>> groupedLogs =
+        _groupLogsByDate(_historyLogs);
+
+    final List<String> sortedDates = groupedLogs.keys.toList()
+      ..sort((a, b) => b.compareTo(a));
+
+    return ListView.builder(
+      controller: _scrollController,
+      physics: const AlwaysScrollableScrollPhysics(),
+      itemCount: sortedDates.length + 1,
+      itemBuilder: (context, dateIndex) {
+        if (dateIndex == sortedDates.length) {
+          return _buildBottomLoader();
+        }
+
+        final String dateHeader = sortedDates[dateIndex];
+        final List<Map<String, dynamic>> dailySales = groupedLogs[dateHeader]!;
+
+        final double dailyAmount = dailySales.fold<double>(
+          0.0,
+          (sum, sale) {
+            final double price = (sale['price'] as num?)?.toDouble() ?? 0.0;
+            return sum + price;
+          },
+        );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                vertical: 8.0,
+                horizontal: 4.0,
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      "📅 $dateHeader",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.orange.shade900,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      "Loaded total: ${dailyAmount.toStringAsFixed(0)} MMK",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.green.shade800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            ...dailySales.map((saleRecord) {
+              final String rawSaleDate =
+                  saleRecord['saleDate']?.toString() ?? '';
+
+              final String timeDisplay = rawSaleDate.length >= 16
+                  ? rawSaleDate.substring(11, 16)
+                  : "00:00";
+
+              final double price =
+                  (saleRecord['price'] as num?)?.toDouble() ?? 0.0;
+
+              return Card(
+                color: Colors.white,
+                elevation: 0.5,
+                margin: const EdgeInsets.only(bottom: 6),
+                child: ListTile(
+                  dense: true,
+                  leading: const Icon(
+                    Icons.receipt_long,
+                    color: Colors.green,
+                  ),
+                  title: Text(
+                    "${saleRecord['type']}",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  subtitle: Text(
+                    "Time: $timeDisplay",
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  trailing: Text(
+                    "${price.toStringAsFixed(0)} MMK",
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.green,
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -137,21 +500,15 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Expanded(
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _showDailyItemTotals
-                                ? "📦 Daily Item Totals"
-                                : "📜 Full Archive Sorted by Day",
-                            style: const TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.grey,
-                            ),
-                          ),
-                        ),
-                      ],
+                    child: Text(
+                      _showDailyItemTotals
+                          ? "📦 Daily Item Totals"
+                          : "📜 Full Archive Sorted by Day",
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -188,276 +545,30 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
               Expanded(
                 child: RefreshIndicator(
                   key: _refreshKey,
-                  onRefresh: () async {
-                    setState(() {});
-                  },
-                  child: FutureBuilder<List<Map<String, dynamic>>>(
-                    future: DBHelper.getSales(),
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-
-                      if (!snapshot.hasData || snapshot.data!.isEmpty) {
-                        return ListView(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          children: const [
-                            SizedBox(height: 100),
-                            Center(
-                              child: Text(
-                                "No transaction history records discovered yet.",
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.grey),
-                              ),
-                            ),
-                          ],
-                        );
-                      }
-
-                      final List<Map<String, dynamic>> allHistoryLogs =
-                          snapshot.data!;
-
-                      final List<Map<String, dynamic>> historyLogs =
-                          _selectedFilterDateText == null
-                          ? allHistoryLogs
-                          : allHistoryLogs.where((sale) {
-                              final String rawDateStr =
-                                  sale['saleDate']?.toString() ?? '';
-                              return _extractDateKey(rawDateStr) ==
-                                  _selectedFilterDateText;
-                            }).toList();
-
-                      if (historyLogs.isEmpty) {
-                        return ListView(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          children: [
-                            const SizedBox(height: 100),
-                            Center(
-                              child: Text(
-                                _selectedFilterDateText == null
-                                    ? "No transaction history records discovered yet."
-                                    : "No transactions found on $_selectedFilterDateText",
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.grey),
-                              ),
-                            ),
-                          ],
-                        );
-                      }
-
-                      final dailyItemTotals = _buildDailyItemTotals(
-                        historyLogs,
-                      );
-                      final dailyAmountTotals = _buildDailyAmountTotals(
-                        historyLogs,
-                      );
-
-                      final Map<String, List<Map<String, dynamic>>>
-                      groupedLogs = {};
-
-                      for (final sale in historyLogs) {
-                        final String rawDateStr =
-                            sale['saleDate']?.toString() ?? '';
-                        final String dateKey = rawDateStr.length >= 10
-                            ? rawDateStr.substring(0, 10)
-                            : "Unknown Date";
-
-                        groupedLogs.putIfAbsent(dateKey, () => []);
-                        groupedLogs[dateKey]!.add(sale);
-                      }
-
-                      if (_showDailyItemTotals) {
-                        final List<String> sortedDates =
-                            dailyItemTotals.keys.toList()
-                              ..sort((a, b) => b.compareTo(a));
-
-                        return ListView.builder(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          itemCount: sortedDates.length,
-                          itemBuilder: (context, dateIndex) {
-                            final String dateHeader = sortedDates[dateIndex];
-                            final Map<String, int> itemTotals =
-                                dailyItemTotals[dateHeader] ?? {};
-                            final double dailyAmount =
-                                dailyAmountTotals[dateHeader] ?? 0.0;
-
-                            final List<MapEntry<String, int>> entries =
-                                itemTotals.entries.toList()
-                                  ..sort((a, b) => b.value.compareTo(a.value));
-
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                  onRefresh: _loadInitialSales,
+                  child: _isInitialLoading
+                      ? const Center(
+                          child: CircularProgressIndicator(),
+                        )
+                      : _historyLogs.isEmpty
+                          ? ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
                               children: [
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 8.0,
-                                    horizontal: 4.0,
-                                  ),
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 4,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: Colors.orange.shade100,
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      "📅 $dateHeader",
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.orange.shade900,
-                                      ),
-                                    ),
+                                const SizedBox(height: 100),
+                                Center(
+                                  child: Text(
+                                    _selectedFilterDateText == null
+                                        ? "No transaction history records discovered yet."
+                                        : "No transactions found on $_selectedFilterDateText",
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(color: Colors.grey),
                                   ),
                                 ),
-                                ...entries.map((entry) {
-                                  return Card(
-                                    color: Colors.white,
-                                    elevation: 0.5,
-                                    margin: const EdgeInsets.only(bottom: 6),
-                                    child: ListTile(
-                                      dense: true,
-                                      leading: const Icon(
-                                        Icons.inventory_2,
-                                        color: Colors.orange,
-                                      ),
-                                      title: Text(
-                                        entry.key,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                      trailing: Text(
-                                        "${entry.value} pcs",
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.deepOrange,
-                                        ),
-                                      ),
-                                    ),
-                                  );
-                                }),
                               ],
-                            );
-                          },
-                        );
-                      }
-
-                      final List<String> sortedDates = groupedLogs.keys.toList()
-                        ..sort((a, b) => b.compareTo(a));
-
-                      return ListView.builder(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        itemCount: sortedDates.length,
-                        itemBuilder: (context, dateIndex) {
-                          final String dateHeader = sortedDates[dateIndex];
-                          final List<Map<String, dynamic>> dailySales =
-                              groupedLogs[dateHeader]!;
-                          final double dailyAmount = dailySales.fold<double>(
-                            0.0,
-                            (sum, sale) {
-                              final double price =
-                                  (sale['price'] as num?)?.toDouble() ?? 0.0;
-                              return sum + price;
-                            },
-                          );
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 8.0,
-                                  horizontal: 4.0,
-                                ),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade300,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        "📅 $dateHeader",
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.orange.shade900,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Text(
-                                        "Total: ${dailyAmount.toStringAsFixed(0)} MMK",
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.green.shade800,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              ...dailySales.map((saleRecord) {
-                                final String rawSaleDate =
-                                    saleRecord['saleDate']?.toString() ?? '';
-                                final String timeDisplay =
-                                    rawSaleDate.length >= 16
-                                    ? rawSaleDate.substring(11, 16)
-                                    : "00:00";
-
-                                final double price =
-                                    (saleRecord['price'] as num?)?.toDouble() ??
-                                    0.0;
-
-                                return Card(
-                                  color: Colors.white,
-                                  elevation: 0.5,
-                                  margin: const EdgeInsets.only(bottom: 6),
-                                  child: ListTile(
-                                    dense: true,
-                                    leading: const Icon(
-                                      Icons.receipt_long,
-                                      color: Colors.green,
-                                    ),
-                                    title: Text(
-                                      "${saleRecord['type']}",
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    subtitle: Text(
-                                      "Time: $timeDisplay",
-                                      style: const TextStyle(fontSize: 11),
-                                    ),
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          "${price.toStringAsFixed(0)} MMK",
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.green,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              }),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
+                            )
+                          : _showDailyItemTotals
+                              ? _buildDailyItemTotalsView()
+                              : _buildFullArchiveView(),
                 ),
               ),
             ],

@@ -8,6 +8,7 @@ import 'package:nguwar/transaction_history_page.dart';
 import 'db_helper.dart';
 import 'item_history_page.dart';
 import 'sync_service.dart';
+import 'dart:io';
 
 void main() {
   runApp(const MyApp());
@@ -51,6 +52,17 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController _checkoutScanController = TextEditingController();
   final TextEditingController _inventorySearchController =
       TextEditingController();
+  final ScrollController _transactionLogsScrollController = ScrollController();
+
+  static const int _transactionLogsPageSize = 50;
+
+  final List<Map<String, dynamic>> _transactionLogs = [];
+
+  bool _isTransactionLogsInitialLoading = true;
+  bool _isTransactionLogsLoadingMore = false;
+  bool _hasMoreTransactionLogs = true;
+
+  int _transactionLogsOffset = 0;
 
   String _inventorySearchText = "";
 
@@ -78,6 +90,16 @@ class _HomePageState extends State<HomePage> {
     _loadInventoryItems();
     _syncService.startListening(branchId: _currentBranch);
     _syncService.syncPending(branchId: _currentBranch);
+    _loadInitialTransactionLogs();
+
+    _transactionLogsScrollController.addListener(() {
+      if (!_transactionLogsScrollController.hasClients) return;
+
+      if (_transactionLogsScrollController.position.pixels >=
+          _transactionLogsScrollController.position.maxScrollExtent - 200) {
+        _loadMoreTransactionLogs();
+      }
+    });
     // In HomePage initState — push first, THEN pull
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       // Step 1: push local changes up first
@@ -115,7 +137,7 @@ class _HomePageState extends State<HomePage> {
     _nameFocusNode.dispose();
     _inventoryPasswordController.dispose();
     _inventorySearchController.dispose();
-
+    _transactionLogsScrollController.dispose();
     super.dispose();
   }
 
@@ -129,6 +151,119 @@ class _HomePageState extends State<HomePage> {
       _trackStock = true;
       _saleEffect = 1;
     }
+  }
+
+  Future<void> _loadInitialTransactionLogs() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isTransactionLogsInitialLoading = true;
+      _isTransactionLogsLoadingMore = false;
+      _hasMoreTransactionLogs = true;
+      _transactionLogsOffset = 0;
+      _transactionLogs.clear();
+    });
+
+    try {
+      final List<Map<String, dynamic>> firstPage =
+          await DBHelper.getSalesPaginated(
+            limit: _transactionLogsPageSize,
+            offset: _transactionLogsOffset,
+          );
+
+      if (!mounted) return;
+
+      setState(() {
+        _transactionLogs.addAll(firstPage);
+        _transactionLogsOffset += firstPage.length;
+        _hasMoreTransactionLogs = firstPage.length == _transactionLogsPageSize;
+        _isTransactionLogsInitialLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _isTransactionLogsInitialLoading = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to load transaction logs: $e")),
+      );
+    }
+  }
+
+  Future<void> _loadMoreTransactionLogs() async {
+    if (_isTransactionLogsLoadingMore ||
+        !_hasMoreTransactionLogs ||
+        _isTransactionLogsInitialLoading) {
+      return;
+    }
+
+    setState(() {
+      _isTransactionLogsLoadingMore = true;
+    });
+
+    try {
+      final List<Map<String, dynamic>> nextPage =
+          await DBHelper.getSalesPaginated(
+            limit: _transactionLogsPageSize,
+            offset: _transactionLogsOffset,
+          );
+
+      if (!mounted) return;
+
+      setState(() {
+        _transactionLogs.addAll(nextPage);
+        _transactionLogsOffset += nextPage.length;
+        _hasMoreTransactionLogs = nextPage.length == _transactionLogsPageSize;
+        _isTransactionLogsLoadingMore = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _isTransactionLogsLoadingMore = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to load more transaction logs: $e")),
+      );
+    }
+  }
+
+  Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
+    List<Map<String, dynamic>> logs,
+  ) {
+    final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
+
+    for (final sale in logs) {
+      final String rawDateStr = sale['saleDate']?.toString() ?? '';
+      final String dateKey = rawDateStr.length >= 10
+          ? rawDateStr.substring(0, 10)
+          : "Unknown Date";
+
+      groupedLogs.putIfAbsent(dateKey, () => []);
+      groupedLogs[dateKey]!.add(sale);
+    }
+
+    return groupedLogs;
+  }
+
+  Widget _buildTransactionLogsBottomLoader() {
+    if (_isTransactionLogsLoadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+
+    return const SizedBox(height: 16);
   }
 
   void _requestHardwareScannerFocus() {
@@ -389,6 +524,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildTransactionLogsTab() {
+    final Map<String, List<Map<String, dynamic>>> groupedLogs =
+        _groupTransactionLogsByDate(_transactionLogs);
+
+    final List<String> sortedDates = groupedLogs.keys.toList()
+      ..sort((a, b) => b.compareTo(a));
+
     return Padding(
       padding: const EdgeInsets.all(12.0),
       child: Column(
@@ -401,8 +542,8 @@ class _HomePageState extends State<HomePage> {
                       builder: (context) => const TransactionHistoryPage(),
                     ),
                   )
-                  .then((_) {
-                    setState(() {});
+                  .then((_) async {
+                    await _loadInitialTransactionLogs();
                   });
             },
             child: MouseRegion(
@@ -434,119 +575,111 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 10),
 
           Expanded(
-            child: FutureBuilder<List<Map<String, Object?>>>(
-              future: DBHelper.getSales(),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-
-                final historyLogs = snapshot.data!;
-
-                if (historyLogs.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      "No transaction history records discovered yet.",
-                    ),
-                  );
-                }
-
-                final Map<String, List<Map<String, Object?>>> groupedLogs = {};
-
-                for (final sale in historyLogs) {
-                  final String rawDateStr = sale['saleDate']?.toString() ?? '';
-                  final String dateKey = rawDateStr.length >= 10
-                      ? rawDateStr.substring(0, 10)
-                      : "Unknown Date";
-
-                  groupedLogs.putIfAbsent(dateKey, () => []);
-                  groupedLogs[dateKey]!.add(sale);
-                }
-
-                final List<String> sortedDates = groupedLogs.keys.toList();
-
-                return ListView.builder(
-                  itemCount: sortedDates.length,
-                  itemBuilder: (context, dateIndex) {
-                    final String dateHeader = sortedDates[dateIndex];
-                    final List<Map<String, Object?>> dailySales =
-                        groupedLogs[dateHeader]!;
-
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            vertical: 8.0,
-                            horizontal: 4.0,
-                          ),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade300,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: Text(
-                              "📅 $dateHeader",
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.grey.shade800,
-                              ),
-                            ),
+            child: RefreshIndicator(
+              onRefresh: _loadInitialTransactionLogs,
+              child: _isTransactionLogsInitialLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _transactionLogs.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: const [
+                        SizedBox(height: 100),
+                        Center(
+                          child: Text(
+                            "No transaction history records discovered yet.",
+                            textAlign: TextAlign.center,
                           ),
                         ),
+                      ],
+                    )
+                  : ListView.builder(
+                      controller: _transactionLogsScrollController,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: sortedDates.length + 1,
+                      itemBuilder: (context, dateIndex) {
+                        if (dateIndex == sortedDates.length) {
+                          return _buildTransactionLogsBottomLoader();
+                        }
 
-                        ...dailySales.map((saleRecord) {
-                          final String saleDate =
-                              saleRecord['saleDate']?.toString() ?? '';
+                        final String dateHeader = sortedDates[dateIndex];
+                        final List<Map<String, dynamic>> dailySales =
+                            groupedLogs[dateHeader]!;
 
-                          final String timeDisplay = saleDate.length >= 16
-                              ? saleDate.substring(11, 16)
-                              : "00:00";
-
-                          final String type =
-                              saleRecord['type']?.toString() ?? '';
-
-                          final double price =
-                              (saleRecord['price'] as num?)?.toDouble() ?? 0.0;
-
-                          return Card(
-                            margin: const EdgeInsets.only(bottom: 6),
-                            child: ListTile(
-                              dense: true,
-                              leading: const Icon(
-                                Icons.receipt_long,
-                                color: Colors.green,
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 8.0,
+                                horizontal: 4.0,
                               ),
-                              title: Text(
-                                type,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w500,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
                                 ),
-                              ),
-                              subtitle: Text(
-                                "Time: $timeDisplay",
-                                style: const TextStyle(fontSize: 11),
-                              ),
-                              trailing: Text(
-                                "${price.toStringAsFixed(0)} MMK",
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.green,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade300,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  "📅 $dateHeader",
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.grey.shade800,
+                                  ),
                                 ),
                               ),
                             ),
-                          );
-                        }),
-                      ],
-                    );
-                  },
-                );
-              },
+
+                            ...dailySales.map((saleRecord) {
+                              final String saleDate =
+                                  saleRecord['saleDate']?.toString() ?? '';
+
+                              final String timeDisplay = saleDate.length >= 16
+                                  ? saleDate.substring(11, 16)
+                                  : "00:00";
+
+                              final String type =
+                                  saleRecord['type']?.toString() ?? '';
+
+                              final double price =
+                                  (saleRecord['price'] as num?)?.toDouble() ??
+                                  0.0;
+
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 6),
+                                child: ListTile(
+                                  dense: true,
+                                  leading: const Icon(
+                                    Icons.receipt_long,
+                                    color: Colors.green,
+                                  ),
+                                  title: Text(
+                                    type,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    "Time: $timeDisplay",
+                                    style: const TextStyle(fontSize: 11),
+                                  ),
+                                  trailing: Text(
+                                    "${price.toStringAsFixed(0)} MMK",
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.green,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }),
+                          ],
+                        );
+                      },
+                    ),
             ),
           ),
         ],
@@ -669,6 +802,24 @@ class _HomePageState extends State<HomePage> {
         backgroundColor: Colors.red,
       ),
     );
+  }
+  // Make sure to import this
+
+  Future<bool> _checkInternetConnection() async {
+    try {
+      final socket = await Socket.connect(
+        '8.8.8.8',
+        53,
+        timeout: const Duration(seconds: 3),
+      );
+      socket
+          .destroy(); // Close it immediately, we only wanted to test the connection
+      return true;
+    } on SocketException catch (_) {
+      return false;
+    } catch (_) {
+      return false; // Catch any other timeout/connection errors
+    }
   }
 
   Future<void> _showEditItemDialog(Map<String, Object?> item) async {
@@ -902,21 +1053,52 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.sync, color: Colors.black87),
             tooltip: 'Sync with Server',
             onPressed: () async {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Syncing pending data...")),
-              );
-              bool success = await _syncService.syncPending(
+              bool isOnline = await _checkInternetConnection();
+
+              if (!isOnline) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("No internet connection."),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+                return;
+              }
+
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Syncing with server...")),
+                );
+              }
+
+              // 1. Push local pending changes to the server
+              bool pushSuccess = await _syncService.syncPending(
                 branchId: _currentBranch,
               );
+
+              // 2. Pull new changes from the server (so Phone B gets Phone A's data)
+              bool pullSuccess = await _syncService.pullFromServer(
+                branchId: _currentBranch,
+              );
+
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                      success ? "✅ Sync Complete" : "❌ Sync Failed (Offline?)",
+                      (pushSuccess && pullSuccess)
+                          ? "✅ Sync Complete"
+                          : "⚠️ Sync finished with errors",
                     ),
-                    backgroundColor: success ? Colors.green : Colors.red,
+                    backgroundColor: (pushSuccess && pullSuccess)
+                        ? Colors.green
+                        : Colors.orange,
                   ),
                 );
+
+                await _loadInventoryItems();
+                setState(() {});
               }
             },
           ),
@@ -1323,7 +1505,6 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 10),
 
-                // Switch Account button
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
@@ -1336,9 +1517,8 @@ class _HomePageState extends State<HomePage> {
                       if (context.mounted) {
                         Navigator.of(context).push(
                           MaterialPageRoute(
-                            builder: (_) => const LoginScreen(
-                              canPop: true,
-                            ), // ← canPop: true
+                            builder: (_) =>
+                                const LoginScreen(), // ← canPop: true
                           ),
                         );
                       }

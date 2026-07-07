@@ -2,12 +2,70 @@ import 'dart:convert';
 
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 
 class DBHelper {
   static Database? _db;
 
-  static const int _dbVersion = 7;
+  static const int _dbVersion = 8;
   static const String defaultBranchId = 'nguwar_1';
+
+  static final Uuid _uuid = Uuid();
+
+  static String _newClientId(String prefix) {
+    return '$prefix-${_uuid.v4()}';
+  }
+
+  static Future<bool> _hasColumn(
+    Database db,
+    String tableName,
+    String columnName,
+  ) async {
+    final columns = await db.rawQuery("PRAGMA table_info($tableName)");
+    return columns.any((col) => col['name'] == columnName);
+  }
+
+  static Future<void> _ensureSyncIdentityColumns(Database db) async {
+    if (!await _hasColumn(db, 'sales', 'serverId')) {
+      await db.execute('ALTER TABLE sales ADD COLUMN serverId INTEGER');
+    }
+
+    if (!await _hasColumn(db, 'sales', 'clientId')) {
+      await db.execute('ALTER TABLE sales ADD COLUMN clientId TEXT');
+    }
+
+    if (!await _hasColumn(db, 'item_history', 'serverId')) {
+      await db.execute('ALTER TABLE item_history ADD COLUMN serverId INTEGER');
+    }
+
+    if (!await _hasColumn(db, 'item_history', 'clientId')) {
+      await db.execute('ALTER TABLE item_history ADD COLUMN clientId TEXT');
+    }
+
+    await db.execute('''
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_server_id
+    ON sales(serverId)
+    WHERE serverId IS NOT NULL
+  ''');
+
+    await db.execute('''
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_id
+    ON sales(clientId)
+    WHERE clientId IS NOT NULL AND clientId != ''
+  ''');
+
+    await db.execute('''
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_history_server_id
+    ON item_history(serverId)
+    WHERE serverId IS NOT NULL
+  ''');
+
+    await db.execute('''
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_history_client_id
+    ON item_history(clientId)
+    WHERE clientId IS NOT NULL AND clientId != ''
+  ''');
+  }
 
   static Future<Database> get database async {
     if (_db != null) return _db!;
@@ -17,6 +75,7 @@ class DBHelper {
       version: _dbVersion,
       onCreate: (db, version) async {
         await _createTables(db);
+        await _ensureSyncIdentityColumns(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         await _ensureItemColumns(db);
@@ -61,6 +120,9 @@ class DBHelper {
             );
           } catch (_) {}
         }
+        if (oldVersion < 8) {
+          await _ensureSyncIdentityColumns(db);
+        }
       },
     );
 
@@ -83,6 +145,7 @@ class DBHelper {
       CREATE TABLE sales(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         serverId INTEGER UNIQUE,
+        clientId TEXT UNIQUE,
         type TEXT,
         price REAL,
         saleDate TEXT
@@ -93,6 +156,7 @@ class DBHelper {
       CREATE TABLE item_history(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         serverId INTEGER UNIQUE,
+        clientId TEXT UNIQUE,
         itemName TEXT,
         barcode TEXT,
         action TEXT,
@@ -180,6 +244,39 @@ class DBHelper {
     return rows.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
+  static Future<List<Map<String, dynamic>>> getItemHistoryPaginated({
+  required int limit,
+  required int offset,
+}) async {
+  final db = await database;
+
+  final rows = await db.query(
+    'item_history',
+    orderBy: 'createdAt DESC',
+    limit: limit,
+    offset: offset,
+  );
+
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
+static Future<List<Map<String, dynamic>>> getSalesPaginated({
+  required int limit,
+  required int offset,
+  String? saleDate,
+}) async {
+  final db = await database;
+
+  final rows = await db.query(
+    'sales',
+    where: saleDate == null ? null : "substr(saleDate, 1, 10) = ?",
+    whereArgs: saleDate == null ? null : [saleDate],
+    orderBy: 'saleDate DESC',
+    limit: limit,
+    offset: offset,
+  );
+
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
   static Future<void> markQueueSynced(List<int> ids) async {
     if (ids.isEmpty) return;
 
@@ -190,6 +287,12 @@ class DBHelper {
       'UPDATE sync_queue SET synced = 1 WHERE id IN ($placeholders)',
       ids,
     );
+  }
+
+  static Future<void> markQueueError(int id, String errorMsg) async {
+    final db = await database;
+    // Set synced = -1 to indicate permanent failure and prevent endless retries
+    await db.rawUpdate('UPDATE sync_queue SET synced = -1 WHERE id = ?', [id]);
   }
 
   static Future<void> clearSyncedQueue() async {
@@ -269,6 +372,7 @@ class DBHelper {
       }
 
       final historyPayload = {
+        'clientId': _newClientId('history'),
         'itemName': name,
         'barcode': barcode,
         'action': action,
@@ -307,6 +411,21 @@ class DBHelper {
     final db = await database;
     return db.query('items', orderBy: 'name ASC');
   }
+  static Future<List<Map<String, dynamic>>> getItemsPaginated({
+  required int limit,
+  required int offset,
+}) async {
+  final db = await database;
+
+  final rows = await db.query(
+    'items',
+    orderBy: 'name ASC',
+    limit: limit,
+    offset: offset,
+  );
+
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
 
   static Future<Map<String, Object?>?> getItemByBarcode(String barcode) async {
     final db = await database;
@@ -331,6 +450,7 @@ class DBHelper {
     final db = await database;
 
     final payload = {
+      'clientId': _newClientId('history'),
       'itemName': itemName,
       'barcode': barcode,
       'action': action,
@@ -338,7 +458,11 @@ class DBHelper {
       'createdAt': _now(),
     };
 
-    await db.insert('item_history', payload);
+    await db.insert(
+      'item_history',
+      payload,
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
 
     if (enqueue) {
       await _insertSyncQueue(
@@ -431,6 +555,7 @@ class DBHelper {
       }
 
       final historyPayload = {
+        'clientId': _newClientId('history'),
         'itemName': cleanName,
         'barcode': cleanBarcode,
         'action': 'Edited Item',
@@ -486,6 +611,7 @@ class DBHelper {
 
       if (existing != null) {
         final historyPayload = {
+          'clientId': _newClientId('history'),
           'itemName': existing['name']?.toString() ?? '',
           'barcode': barcode,
           'action': 'Deleted Item',
@@ -512,13 +638,23 @@ class DBHelper {
   }) async {
     final db = await database;
 
+    final String clientId =
+        sale['clientId']?.toString().trim().isNotEmpty == true
+        ? sale['clientId'].toString()
+        : _newClientId('sale');
+
     final payload = {
+      'clientId': clientId,
       'type': sale['type'],
       'price': sale['price'],
       'saleDate': sale['saleDate'] ?? _now(),
     };
 
-    await db.insert('sales', payload);
+    await db.insert(
+      'sales',
+      payload,
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
 
     await _insertSyncQueue(
       db,
@@ -532,70 +668,180 @@ class DBHelper {
   // Upsert item from server (no sync queue — data already on server)
   static Future<void> upsertItemFromServer(Map<String, dynamic> item) async {
     final db = await database;
-    final String barcode = item['barcode']?.toString() ?? '';
-    final existing = await getItemByBarcode(barcode);
 
-    if (existing != null) {
-      // ✅ Item already exists locally — only update name/price/settings
-      // NEVER overwrite quantity from server (local is more accurate)
-      await db.update(
-        'items',
-        {
-          'name': item['name']?.toString() ?? '',
-          'priceUnit':
-              double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
-          'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
-          'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
-        },
-        where: 'barcode = ?',
-        whereArgs: [barcode],
-      );
-    } else {
-      // ✅ New item — insert everything including quantity
-      await db.insert('items', {
-        'barcode': barcode,
-        'name': item['name']?.toString() ?? '',
-        'quantity': (item['quantity'] as num?)?.toInt() ?? 0,
-        'priceUnit':
-            double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
-        'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
-        'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
-      }, conflictAlgorithm: ConflictAlgorithm.replace);
-    }
+    final String barcode = item['barcode']?.toString().trim() ?? '';
+    if (barcode.isEmpty) return;
+
+    final int serverQty =
+        (item['quantity'] as num?)?.toInt() ??
+        int.tryParse(item['quantity']?.toString() ?? '0') ??
+        0;
+
+    final data = {
+      'barcode': barcode,
+      'name': item['name']?.toString() ?? '',
+      'quantity': serverQty,
+      'priceUnit': double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
+      'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
+      'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
+    };
+
+    await db.insert(
+      'items',
+      data,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   static Future<void> upsertHistoryFromServer(Map<String, dynamic> h) async {
     final db = await database;
-    await db.insert('item_history', {
-      'serverId':  h['id'], 
-      'itemName': h['itemName']?.toString() ?? '',
-      'barcode': h['barcode']?.toString() ?? '',
-      'action': h['action']?.toString() ?? '',
-      'qty': (h['qty'] as num?)?.toInt() ?? 0,
-      'createdAt': h['createdAt']?.toString() ?? '',
-    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+
+    final int? serverId = int.tryParse(
+      (h['id'] ?? h['serverId'] ?? '').toString(),
+    );
+
+    final String clientId = h['clientId']?.toString().trim() ?? '';
+
+    final String itemName = h['itemName']?.toString() ?? '';
+    final String barcode = h['barcode']?.toString() ?? '';
+    final String action = h['action']?.toString() ?? '';
+    final int qty = (h['qty'] as num?)?.toInt() ?? 0;
+    final String createdAt = h['createdAt']?.toString() ?? '';
+
+    final data = {
+      'serverId': serverId,
+      'clientId': clientId.isEmpty ? null : clientId,
+      'itemName': itemName,
+      'barcode': barcode,
+      'action': action,
+      'qty': qty,
+      'createdAt': createdAt,
+    };
+
+    // Best match: same clientId from this phone.
+    if (clientId.isNotEmpty) {
+      final existing = await db.query(
+        'item_history',
+        where: 'clientId = ?',
+        whereArgs: [clientId],
+        limit: 1,
+      );
+
+      if (existing.isNotEmpty) {
+        await db.update(
+          'item_history',
+          data,
+          where: 'id = ?',
+          whereArgs: [existing.first['id']],
+        );
+        return;
+      }
+    }
+
+    // Fallback for old backend response without clientId.
+    final existingLocal = await db.query(
+      'item_history',
+      where: '''
+      serverId IS NULL
+      AND itemName = ?
+      AND barcode = ?
+      AND action = ?
+      AND qty = ?
+      AND createdAt = ?
+    ''',
+      whereArgs: [itemName, barcode, action, qty, createdAt],
+      limit: 1,
+    );
+
+    if (existingLocal.isNotEmpty) {
+      await db.update(
+        'item_history',
+        data,
+        where: 'id = ?',
+        whereArgs: [existingLocal.first['id']],
+      );
+      return;
+    }
+
+    await db.insert(
+      'item_history',
+      data,
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
   }
 
   // Upsert sale from server (no sync queue — data already on server)
   static Future<void> upsertSaleFromServer(Map<String, dynamic> sale) async {
     final db = await database;
-    await db.insert(
-      'sales',
-      {
-        'serverId': sale['id'],
-        'type': sale['type']?.toString() ?? '',
-        'price': double.tryParse(sale['price']?.toString() ?? '0') ?? 0.0,
-        'saleDate': sale['saleDate']?.toString() ?? '',
-      },
-      conflictAlgorithm:
-          ConflictAlgorithm.ignore, // don't duplicate existing sales
+
+    final int? serverId = int.tryParse(
+      (sale['id'] ?? sale['serverId'] ?? '').toString(),
     );
+
+    final String clientId = sale['clientId']?.toString().trim() ?? '';
+
+    final String type = sale['type']?.toString() ?? '';
+    final double price =
+        double.tryParse(sale['price']?.toString() ?? '0') ?? 0.0;
+    final String saleDate = sale['saleDate']?.toString() ?? '';
+
+    final data = {
+      'serverId': serverId,
+      'clientId': clientId.isEmpty ? null : clientId,
+      'type': type,
+      'price': price,
+      'saleDate': saleDate,
+    };
+
+    // Best match: same clientId from this phone.
+    if (clientId.isNotEmpty) {
+      final existing = await db.query(
+        'sales',
+        where: 'clientId = ?',
+        whereArgs: [clientId],
+        limit: 1,
+      );
+
+      if (existing.isNotEmpty) {
+        await db.update(
+          'sales',
+          data,
+          where: 'id = ?',
+          whereArgs: [existing.first['id']],
+        );
+        return;
+      }
+    }
+    final existingLocal = await db.query(
+      'sales',
+      where: '''
+      serverId IS NULL
+      AND type = ?
+      AND saleDate = ?
+      AND ABS(price - ?) < 0.0001
+    ''',
+      whereArgs: [type, saleDate, price],
+      limit: 1,
+    );
+
+    if (existingLocal.isNotEmpty) {
+      await db.update(
+        'sales',
+        data,
+        where: 'id = ?',
+        whereArgs: [existingLocal.first['id']],
+      );
+      return;
+    }
+
+    await db.insert('sales', data, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
   static Future<List<Map<String, Object?>>> getSales() async {
     final db = await database;
     return db.query('sales', orderBy: 'saleDate DESC');
   }
+  
 
   static Future<void> deleteSale(int id) async {
     final db = await database;
@@ -608,7 +854,40 @@ class DBHelper {
       _db = null;
     }
   }
-    static Future<void> clearLocalData() async {
+
+  static Future<void> cleanupDuplicateSyncedRows([Database? existingDb]) async {
+    final db = existingDb ?? await database;
+
+    await db.execute('''
+    DELETE FROM sales
+    WHERE serverId IS NULL
+    AND EXISTS (
+      SELECT 1
+      FROM sales s2
+      WHERE s2.serverId IS NOT NULL
+      AND s2.type = sales.type
+      AND s2.saleDate = sales.saleDate
+      AND ABS(s2.price - sales.price) < 0.0001
+    )
+  ''');
+
+    await db.execute('''
+    DELETE FROM item_history
+    WHERE serverId IS NULL
+    AND EXISTS (
+      SELECT 1
+      FROM item_history h2
+      WHERE h2.serverId IS NOT NULL
+      AND h2.itemName = item_history.itemName
+      AND h2.barcode = item_history.barcode
+      AND h2.action = item_history.action
+      AND h2.qty = item_history.qty
+      AND h2.createdAt = item_history.createdAt
+    )
+  ''');
+  }
+
+  static Future<void> clearLocalData() async {
     final db = await database;
     await db.transaction((txn) async {
       await txn.delete('items');
