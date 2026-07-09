@@ -67,7 +67,16 @@ class _HomePageState extends State<HomePage> {
   String _inventorySearchText = "";
 
   final FocusNode _checkoutScanFocusNode = FocusNode();
-  final List<Map<String, dynamic>> _activeCart = [];
+  final PageController _basketPageController = PageController();
+
+  int _activeBasketIndex = 0;
+
+  final List<List<Map<String, dynamic>>> _baskets = [
+    <Map<String, dynamic>>[],
+    <Map<String, dynamic>>[],
+  ];
+
+  List<Map<String, dynamic>> get _activeCart => _baskets[_activeBasketIndex];
   bool _hardwareScannerMode = false;
   bool _trackStock = true;
   int _saleEffect = 1;
@@ -138,6 +147,7 @@ class _HomePageState extends State<HomePage> {
     _inventoryPasswordController.dispose();
     _inventorySearchController.dispose();
     _transactionLogsScrollController.dispose();
+    _basketPageController.dispose();
     super.dispose();
   }
 
@@ -688,7 +698,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   double _getCartTotalCost() {
-    return _activeCart.fold(0.0, (sum, item) {
+    return _getCartTotalCostFor(_activeCart);
+  }
+
+  double _getCartTotalCostFor(List<Map<String, dynamic>> cart) {
+    return cart.fold(0.0, (sum, item) {
       final double price = (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
       final int qty = (item['quantity'] as num?)?.toInt() ?? 0;
       final int saleEffect = (item['saleEffect'] as num?)?.toInt() ?? 1;
@@ -1645,156 +1659,226 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              "🛒 Scanned Basket List",
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  "🛒 Basket ${_activeBasketIndex + 1}",
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Text(
+                "Swipe ⇆",
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
           ),
+          const SizedBox(height: 6),
+
+          Row(
+            children: List.generate(_baskets.length, (index) {
+              final bool selected = index == _activeBasketIndex;
+              final int itemCount = _baskets[index].fold<int>(
+                0,
+                (sum, item) => sum + ((item['quantity'] as num?)?.toInt() ?? 0),
+              );
+
+              return Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
+                  child: ChoiceChip(
+                    selected: selected,
+                    label: Text("Basket ${index + 1} • $itemCount"),
+                    selectedColor: Colors.amber.shade300,
+                    onSelected: (_) {
+                      setState(() {
+                        _activeBasketIndex = index;
+                      });
+
+                      _basketPageController.animateToPage(
+                        index,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOut,
+                      );
+                    },
+                  ),
+                ),
+              );
+            }),
+          ),
+
           const SizedBox(height: 6),
           Expanded(
             flex: 3,
-            child: _activeCart.isEmpty
-                ? const Card(
-                    child: Center(
-                      child: Text(
-                        "Basket is empty.\nScan with hardware scanner or tap the camera icon!",
-                      ),
-                    ),
-                  )
-                : Card(
-                    color: Colors.white,
-                    child: ListView.builder(
-                      itemCount: _activeCart.length,
-                      itemBuilder: (context, index) {
-                        final cartItem = _activeCart[index];
-                        final int saleEffect =
-                            (cartItem['saleEffect'] as num?)?.toInt() ?? 1;
-                        final double unitPrice =
-                            (cartItem['priceUnit'] as num?)?.toDouble() ?? 0.0;
-                        final int qty =
-                            (cartItem['quantity'] as num?)?.toInt() ?? 0;
-                        final String name =
-                            cartItem['name']?.toString() ?? 'Unknown Item';
+            child: PageView.builder(
+              controller: _basketPageController,
+              itemCount: _baskets.length,
+              onPageChanged: (index) {
+                setState(() {
+                  _activeBasketIndex = index;
+                });
 
-                        final double totalItemCost =
-                            unitPrice * qty * saleEffect;
+                if (_hardwareScannerMode) {
+                  _requestHardwareScannerFocus();
+                }
+              },
+              itemBuilder: (context, basketIndex) {
+                final cart = _baskets[basketIndex];
 
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 6,
+                return cart.isEmpty
+                    ? Card(
+                        child: Center(
+                          child: Text(
+                            "Basket ${basketIndex + 1} is empty.\nScan with hardware scanner or tap the camera icon!",
+                            textAlign: TextAlign.center,
                           ),
-                          child: Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.08),
-                                  blurRadius: 4,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    CircleAvatar(
-                                      radius: 24,
-                                      backgroundColor: saleEffect == -1
-                                          ? Colors.red.shade100
-                                          : Colors.amber.shade200,
-                                      child: Text(
-                                        "${qty}x",
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.black,
-                                        ),
-                                      ),
-                                    ),
+                        ),
+                      )
+                    : Card(
+                        color: Colors.white,
+                        child: ListView.builder(
+                          itemCount: cart.length,
+                          itemBuilder: (context, index) {
+                            final cartItem = cart[index];
+                            final int saleEffect =
+                                (cartItem['saleEffect'] as num?)?.toInt() ?? 1;
+                            final double unitPrice =
+                                (cartItem['priceUnit'] as num?)?.toDouble() ??
+                                0.0;
+                            final int qty =
+                                (cartItem['quantity'] as num?)?.toInt() ?? 0;
+                            final String name =
+                                cartItem['name']?.toString() ?? 'Unknown Item';
 
-                                    const SizedBox(width: 12),
+                            final double totalItemCost =
+                                unitPrice * qty * saleEffect;
 
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            name,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 3),
-                                          Text(
-                                            saleEffect == -1
-                                                ? "Deduct item: ${unitPrice.toStringAsFixed(0)} MMK"
-                                                : "Unit Price: ${unitPrice.toStringAsFixed(0)} MMK",
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 13,
-                                              color: Colors.black54,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 6,
+                              ),
+                              child: Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withOpacity(0.08),
+                                      blurRadius: 4,
+                                      offset: const Offset(0, 2),
                                     ),
                                   ],
                                 ),
-
-                                const SizedBox(height: 8),
-
-                                Row(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Expanded(
-                                      child: Text(
-                                        "${totalItemCost.toStringAsFixed(0)} MMK",
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: saleEffect == -1
-                                              ? Colors.red
-                                              : Colors.green,
+                                    Row(
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 24,
+                                          backgroundColor: saleEffect == -1
+                                              ? Colors.red.shade100
+                                              : Colors.amber.shade200,
+                                          child: Text(
+                                            "${qty}x",
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.black,
+                                            ),
+                                          ),
                                         ),
-                                      ),
+
+                                        const SizedBox(width: 12),
+
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                name,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 3),
+                                              Text(
+                                                saleEffect == -1
+                                                    ? "Deduct item: ${unitPrice.toStringAsFixed(0)} MMK"
+                                                    : "Unit Price: ${unitPrice.toStringAsFixed(0)} MMK",
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 13,
+                                                  color: Colors.black54,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
                                     ),
 
-                                    _cartIconButton(
-                                      icon: Icons.remove_circle_outline,
-                                      color: Colors.orange,
-                                      onPressed: () => _decreaseCartQty(index),
-                                    ),
+                                    const SizedBox(height: 8),
 
-                                    _cartIconButton(
-                                      icon: Icons.add_circle_outline,
-                                      color: Colors.green,
-                                      onPressed: () => _increaseCartQty(index),
-                                    ),
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            "${totalItemCost.toStringAsFixed(0)} MMK",
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: saleEffect == -1
+                                                  ? Colors.red
+                                                  : Colors.green,
+                                            ),
+                                          ),
+                                        ),
 
-                                    _cartIconButton(
-                                      icon: Icons.delete,
-                                      color: Colors.red,
-                                      onPressed: () => _removeCartItem(index),
+                                        _cartIconButton(
+                                          icon: Icons.remove_circle_outline,
+                                          color: Colors.orange,
+                                          onPressed: () =>
+                                              _decreaseCartQty(index),
+                                        ),
+
+                                        _cartIconButton(
+                                          icon: Icons.add_circle_outline,
+                                          color: Colors.green,
+                                          onPressed: () =>
+                                              _increaseCartQty(index),
+                                        ),
+
+                                        _cartIconButton(
+                                          icon: Icons.delete,
+                                          color: Colors.red,
+                                          onPressed: () =>
+                                              _removeCartItem(index),
+                                        ),
+                                      ],
                                     ),
                                   ],
                                 ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
+                              ),
+                            );
+                          },
+                        ),
+                      );
+              },
+            ),
           ),
           if (_activeCart.isNotEmpty) ...[
             Padding(

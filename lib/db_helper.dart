@@ -288,7 +288,64 @@ static Future<List<Map<String, dynamic>>> getSalesPaginated({
       ids,
     );
   }
+static Future<List<Map<String, dynamic>>> getSaleDateSummariesPaginated({
+  required int limit,
+  required int offset,
+}) async {
+  final db = await database;
 
+  final rows = await db.rawQuery(
+    '''
+    SELECT
+      substr(saleDate, 1, 10) AS dateKey,
+      COUNT(*) AS transactionCount,
+      COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
+    FROM sales
+    WHERE saleDate IS NOT NULL
+      AND length(saleDate) >= 10
+    GROUP BY substr(saleDate, 1, 10)
+    ORDER BY dateKey DESC
+    LIMIT ? OFFSET ?
+    ''',
+    [limit, offset],
+  );
+
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
+
+static Future<Map<String, dynamic>?> getSaleDateSummary(String saleDate) async {
+  final db = await database;
+
+  final rows = await db.rawQuery(
+    '''
+    SELECT
+      substr(saleDate, 1, 10) AS dateKey,
+      COUNT(*) AS transactionCount,
+      COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
+    FROM sales
+    WHERE substr(saleDate, 1, 10) = ?
+    GROUP BY substr(saleDate, 1, 10)
+    ''',
+    [saleDate],
+  );
+
+  if (rows.isEmpty) return null;
+
+  return Map<String, dynamic>.from(rows.first);
+}
+
+static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async {
+  final db = await database;
+
+  final rows = await db.query(
+    'sales',
+    where: 'substr(saleDate, 1, 10) = ?',
+    whereArgs: [saleDate],
+    orderBy: 'saleDate DESC',
+  );
+
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
   static Future<void> markQueueError(int id, String errorMsg) async {
     final db = await database;
     // Set synced = -1 to indicate permanent failure and prevent endless retries
