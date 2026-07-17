@@ -109,11 +109,8 @@ class _HomePageState extends State<HomePage> {
         _loadMoreTransactionLogs();
       }
     });
-    // In HomePage initState — push first, THEN pull
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      // Step 1: push local changes up first
       await _syncService.syncPending(branchId: _currentBranch);
-      // Step 2: pull clean server state down
       final pulled = await _syncService.pullFromServer(
         branchId: _currentBranch,
       );
@@ -417,7 +414,7 @@ class _HomePageState extends State<HomePage> {
     if (matchedItem == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text("❌ Item not found for barcode: $barcode"),
+          content: Text("Item not found for barcode: $barcode"),
           backgroundColor: Colors.red,
           duration: const Duration(seconds: 1),
         ),
@@ -428,7 +425,7 @@ class _HomePageState extends State<HomePage> {
     final int trackStock = (matchedItem['trackStock'] as num?)?.toInt() ?? 1;
     final int saleEffect = (matchedItem['saleEffect'] as num?)?.toInt() ?? 1;
     final String productName =
-        matchedItem['name']?.toString() ?? 'Unknown Item';
+        matchedItem['name']?.toString() ?? "Unknown Item";
     final double unitPrice =
         (matchedItem['priceUnit'] as num?)?.toDouble() ?? 0.0;
 
@@ -436,8 +433,21 @@ class _HomePageState extends State<HomePage> {
       (element) => element['barcode'] == barcode,
     );
 
+    if (basketIndex == -1 && _activeCart.length >= 10) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("⚠️ Basket is full! Maximum 10 unique items allowed."),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      if (_hardwareScannerMode) {
+        _requestHardwareScannerFocus();
+      }
+      return;
+    }
     final int quantityInBasketAlready = basketIndex != -1
-        ? ((_activeCart[basketIndex]['quantity'] as num?)?.toInt() ?? 0)
+        ? (_activeCart[basketIndex]['quantity'] as num?)?.toInt() ?? 0
         : 0;
 
     setState(() {
@@ -460,7 +470,7 @@ class _HomePageState extends State<HomePage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          "➕ Added 1x $productName successfully! Total in basket: ${quantityInBasketAlready + 1}",
+          "Added 1x $productName successfully! Total in basket: ${quantityInBasketAlready + 1}",
         ),
         backgroundColor: Colors.green,
         duration: const Duration(milliseconds: 800),
@@ -1039,6 +1049,39 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  InputDecoration _customInputDecoration({
+    required String label,
+    required IconData icon,
+    String? hint,
+    String? helper,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      helperText: helper,
+      prefixIcon: Icon(icon, color: Colors.amber.shade700),
+      filled: true,
+      fillColor: Colors.grey.shade50,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: Colors.grey.shade300),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: Colors.grey.shade300),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.amber, width: 2),
+      ),
+      floatingLabelStyle: const TextStyle(
+        color: Colors.amber,
+        fontWeight: FontWeight.bold,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1098,12 +1141,17 @@ class _HomePageState extends State<HomePage> {
               );
 
               if (mounted) {
+                // FIX 3: Identify exactly which operation failed
+                String errorMessage = "";
+                if (!pushSuccess) errorMessage += "Push failed. ";
+                if (!pullSuccess) errorMessage += "Pull failed.";
+
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
                       (pushSuccess && pullSuccess)
                           ? "✅ Sync Complete"
-                          : "⚠️ Sync finished with errors",
+                          : "⚠️ Sync finished with errors: $errorMessage",
                     ),
                     backgroundColor: (pushSuccess && pullSuccess)
                         ? Colors.green
@@ -1178,24 +1226,24 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Icon(Icons.add_business, color: Colors.amber, size: 28),
                     SizedBox(width: 10),
-                    Text(
-                      "Add New Item",
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                    Text("Add New Item", style: TextStyle(fontSize: 20)),
                   ],
                 ),
                 const Divider(height: 30),
                 SwitchListTile(
-                  title: const Text("Track Inventory Stock"),
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    "Track Inventory Stock",
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
                   subtitle: Text(
                     _trackStock
                         ? "This item reduces store stock"
                         : "This item is sellable but not stock-tracked",
+                    style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
                   ),
                   value: _trackStock,
+                  activeColor: Colors.amber,
                   onChanged: (value) {
                     setState(() {
                       _trackStock = value;
@@ -1203,12 +1251,13 @@ class _HomePageState extends State<HomePage> {
                     });
                   },
                 ),
+                const SizedBox(height: 8),
                 if (!_trackStock) ...[
                   DropdownButtonFormField<int>(
                     value: _saleEffect,
-                    decoration: const InputDecoration(
-                      labelText: "Non-stock behavior",
-                      border: OutlineInputBorder(),
+                    decoration: _customInputDecoration(
+                      label: "Non-stock behavior",
+                      icon: Icons.category_rounded,
                     ),
                     items: const [
                       DropdownMenuItem(value: 1, child: Text("Ice")),
@@ -1227,9 +1276,9 @@ class _HomePageState extends State<HomePage> {
                     Expanded(
                       child: TextField(
                         controller: _barcodeController,
-                        decoration: const InputDecoration(
-                          labelText: "Barcode (ID)",
-                          border: OutlineInputBorder(),
+                        decoration: _customInputDecoration(
+                          label: "Barcode (ID)",
+                          icon: Icons.qr_code_scanner_rounded,
                         ),
                         onChanged: (value) async {
                           if (value.trim().isEmpty) return;
@@ -1247,55 +1296,65 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    IconButton.filledTonal(
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (dialogCtx) => AlertDialog(
-                            title: const Text("Scan Stock Barcode"),
-                            content: SizedBox(
-                              width: double.maxFinite,
-                              height: 300,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(12),
-                                child: MobileScanner(
-                                  onDetect: (BarcodeCapture capture) async {
-                                    final List<Barcode> barcodes =
-                                        capture.barcodes;
-                                    if (barcodes.isEmpty) return;
+                    Container(
+                      height: 56, // Match the height of the modern text field
+                      decoration: BoxDecoration(
+                        color: Colors.amber.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.amber.shade200),
+                      ),
+                      child: IconButton(
+                        onPressed: () {
+                          showDialog(
+                            context: context,
+                            builder: (dialogCtx) => AlertDialog(
+                              title: const Text("Scan Stock Barcode"),
+                              content: SizedBox(
+                                width: double.maxFinite,
+                                height: 300,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: MobileScanner(
+                                    onDetect: (BarcodeCapture capture) async {
+                                      final List<Barcode> barcodes =
+                                          capture.barcodes;
+                                      if (barcodes.isEmpty) return;
 
-                                    final String? code =
-                                        barcodes.first.rawValue;
-                                    if (code == null) return;
+                                      final String? code =
+                                          barcodes.first.rawValue;
+                                      if (code == null) return;
 
-                                    Navigator.of(dialogCtx).pop();
+                                      Navigator.of(dialogCtx).pop();
 
-                                    setState(() {
-                                      _barcodeController.text = code;
-                                    });
-
-                                    final matched =
-                                        await DBHelper.getItemByBarcode(code);
-
-                                    if (matched != null && mounted) {
                                       setState(() {
-                                        _fillDrawerWithMatchedItem(matched);
+                                        _barcodeController.text = code;
                                       });
-                                    }
-                                  },
+
+                                      final matched =
+                                          await DBHelper.getItemByBarcode(code);
+
+                                      if (matched != null && mounted) {
+                                        setState(() {
+                                          _fillDrawerWithMatchedItem(matched);
+                                        });
+                                      }
+                                    },
+                                  ),
                                 ),
                               ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () =>
+                                      Navigator.of(dialogCtx).pop(),
+                                  child: const Text("Cancel"),
+                                ),
+                              ],
                             ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(dialogCtx).pop(),
-                                child: const Text("Cancel"),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.camera_alt),
+                          );
+                        },
+                        icon: const Icon(Icons.camera_alt, color: Colors.amber),
+                        tooltip: "Scan Barcode",
+                      ),
                     ),
                   ],
                 ),
@@ -1342,11 +1401,10 @@ class _HomePageState extends State<HomePage> {
                         return TextField(
                           controller: controller,
                           focusNode: focusNode,
-                          decoration: const InputDecoration(
-                            labelText: "Product Name",
-                            hintText: "Search from inventory",
-                            prefixIcon: Icon(Icons.search),
-                            border: OutlineInputBorder(),
+                          decoration: _customInputDecoration(
+                            label: "Product Name",
+                            icon: Icons.shopping_bag_rounded,
+                            hint: "Search from inventory",
                           ),
                         );
                       },
@@ -1360,7 +1418,9 @@ class _HomePageState extends State<HomePage> {
                         return Align(
                           alignment: Alignment.topLeft,
                           child: Material(
-                            elevation: 4,
+                            elevation: 8,
+                            borderRadius: BorderRadius.circular(12),
+                            clipBehavior: Clip.antiAlias,
                             child: ConstrainedBox(
                               constraints: const BoxConstraints(
                                 maxHeight: 250,
@@ -1383,9 +1443,21 @@ class _HomePageState extends State<HomePage> {
 
                                   return ListTile(
                                     dense: true,
-                                    title: Text(name),
+                                    leading: const Icon(
+                                      Icons.inventory_2_outlined,
+                                      size: 20,
+                                    ),
+                                    title: Text(
+                                      name,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
                                     subtitle: Text(
-                                      "Barcode: $barcode • Qty: $quantity • Price: $price",
+                                      "ID: $barcode • Qty: $quantity • Price: $price",
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                      ),
                                     ),
                                     onTap: () {
                                       onSelected(item);
@@ -1403,10 +1475,9 @@ class _HomePageState extends State<HomePage> {
                   TextField(
                     controller: _quantityController,
                     keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: "Quantity Stock",
-                      helperText: "e.g., 10",
-                      border: OutlineInputBorder(),
+                    decoration: _customInputDecoration(
+                      label: "Quantity Stock",
+                      icon: Icons.layers_rounded,
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -1416,30 +1487,35 @@ class _HomePageState extends State<HomePage> {
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
-                  decoration: const InputDecoration(
-                    labelText: "Unit Price (Each Item)",
-                    helperText: "e.g., 1000 MMK for each single item",
-                    border: OutlineInputBorder(),
+                  decoration: _customInputDecoration(
+                    label: "Unit Price",
+                    icon: Icons.payments_rounded,
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
                 SizedBox(
                   width: double.infinity,
-                  height: 48,
+                  height: 52,
                   child: ElevatedButton.icon(
                     onPressed: _saveItemFromDrawer,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.amber,
+                      foregroundColor: Colors.black87,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
-                    icon: const Icon(Icons.save, color: Colors.black),
+                    icon: const Icon(Icons.save_rounded),
                     label: const Text(
                       "Save Item Data",
-                      style: TextStyle(color: Colors.black),
+                      style: TextStyle(fontSize: 16),
                     ),
                   ),
                 ),
 
                 // ── PROFILE SECTION ──
+                const SizedBox(height: 16),
                 const Divider(height: 20),
                 GestureDetector(
                   onTap: () {

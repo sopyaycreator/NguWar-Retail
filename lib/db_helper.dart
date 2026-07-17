@@ -196,7 +196,7 @@ class DBHelper {
     }
   }
 
-  static String _now() => DateTime.now().toIso8601String();
+ static String _now() => DateTime.now().toUtc().toIso8601String();
 
   static Future<void> _insertSyncQueue(
     DatabaseExecutor executor, {
@@ -346,10 +346,14 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
 
   return rows.map((e) => Map<String, dynamic>.from(e)).toList();
 }
-  static Future<void> markQueueError(int id, String errorMsg) async {
+    static Future<void> markQueueError(int id, String errorMsg) async {
+  
+    print('Sync failed for ID $id: $errorMsg. Keeping in queue to retry.');
+  }
+
+  static Future<void> recoverFailedTransactions() async {
     final db = await database;
-    // Set synced = -1 to indicate permanent failure and prevent endless retries
-    await db.rawUpdate('UPDATE sync_queue SET synced = -1 WHERE id = ?', [id]);
+    await db.rawUpdate('UPDATE sync_queue SET synced = 0 WHERE synced = -1');
   }
 
   static Future<void> clearSyncedQueue() async {
@@ -869,27 +873,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
         return;
       }
     }
-    final existingLocal = await db.query(
-      'sales',
-      where: '''
-      serverId IS NULL
-      AND type = ?
-      AND saleDate = ?
-      AND ABS(price - ?) < 0.0001
-    ''',
-      whereArgs: [type, saleDate, price],
-      limit: 1,
-    );
-
-    if (existingLocal.isNotEmpty) {
-      await db.update(
-        'sales',
-        data,
-        where: 'id = ?',
-        whereArgs: [existingLocal.first['id']],
-      );
-      return;
-    }
+  
 
     await db.insert('sales', data, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
@@ -913,35 +897,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
   }
 
   static Future<void> cleanupDuplicateSyncedRows([Database? existingDb]) async {
-    final db = existingDb ?? await database;
-
-    await db.execute('''
-    DELETE FROM sales
-    WHERE serverId IS NULL
-    AND EXISTS (
-      SELECT 1
-      FROM sales s2
-      WHERE s2.serverId IS NOT NULL
-      AND s2.type = sales.type
-      AND s2.saleDate = sales.saleDate
-      AND ABS(s2.price - sales.price) < 0.0001
-    )
-  ''');
-
-    await db.execute('''
-    DELETE FROM item_history
-    WHERE serverId IS NULL
-    AND EXISTS (
-      SELECT 1
-      FROM item_history h2
-      WHERE h2.serverId IS NOT NULL
-      AND h2.itemName = item_history.itemName
-      AND h2.barcode = item_history.barcode
-      AND h2.action = item_history.action
-      AND h2.qty = item_history.qty
-      AND h2.createdAt = item_history.createdAt
-    )
-  ''');
+    
   }
 
   static Future<void> clearLocalData() async {

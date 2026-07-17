@@ -15,24 +15,26 @@ class SyncService {
   StreamSubscription<List<ConnectivityResult>>? _subscription;
   bool _isSyncing = false;
 
-void startListening({required String branchId}) {
-  _subscription = Connectivity().onConnectivityChanged.listen((_) async {
-    await syncPending(branchId: branchId);
-  });
-}
+  void startListening({required String branchId}) {
+    _subscription = Connectivity().onConnectivityChanged.listen((_) async {
+      await syncPending(branchId: branchId);
+    });
+  }
 
   Future<void> dispose() async {
     await _subscription?.cancel();
   }
-Future<bool> synchronize({required String branchId}) async {
-  final pushed = await syncPending(branchId: branchId);
 
-  if (!pushed) return false;
+  Future<bool> synchronize({required String branchId}) async {
+    final pushed = await syncPending(branchId: branchId);
 
-  final pulled = await pullFromServer(branchId: branchId);
+    if (!pushed) return false;
 
-  return pulled;
-}
+    final pulled = await pullFromServer(branchId: branchId);
+
+    return pulled;
+  }
+
   Future<bool> pullFromServer({required String branchId}) async {
     try {
       debugPrint('>>> pullFromServer start: $branchId');
@@ -45,7 +47,7 @@ Future<bool> synchronize({required String branchId}) async {
       try {
         itemsRes = await http
             .get(itemsUri, headers: {'x-api-key': apiKey})
-            .timeout(const Duration(seconds: 10)); // ← shorter timeout
+            .timeout(const Duration(seconds: 60)); // ← shorter timeout
         debugPrint('>>> items status: ${itemsRes.statusCode}');
         debugPrint('>>> items body: ${itemsRes.body}');
       } catch (e) {
@@ -74,7 +76,7 @@ Future<bool> synchronize({required String branchId}) async {
       try {
         salesRes = await http
             .get(salesUri, headers: {'x-api-key': apiKey})
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 60));
         debugPrint('>>> sales status: ${salesRes.statusCode}');
       } catch (e) {
         debugPrint('>>> sales request failed: $e');
@@ -101,7 +103,7 @@ Future<bool> synchronize({required String branchId}) async {
       try {
         historyRes = await http
             .get(historyUri, headers: {'x-api-key': apiKey})
-            .timeout(const Duration(seconds: 10));
+            .timeout(const Duration(seconds: 60));
         debugPrint('>>> history status: ${historyRes.statusCode}');
       } catch (e) {
         debugPrint('>>> history request failed: $e');
@@ -120,15 +122,24 @@ Future<bool> synchronize({required String branchId}) async {
           }
         }
       }
-   debugPrint('>>> pullFromServer done');
-return true;
+      debugPrint('>>> pullFromServer done');
+      return true;
     } catch (e) {
       debugPrint('pullFromServer error: $e');
       return false;
     }
   }
-Future<bool> syncPending({required String branchId}) async {
-    if (_isSyncing) return false;
+
+  Future<bool> syncPending({required String branchId}) async {
+    // FIX: Wait briefly if a background sync (via connectivity listener) is already running
+    if (_isSyncing) {
+      int retries = 0;
+      while (_isSyncing && retries < 15) {
+        await Future.delayed(const Duration(seconds: 1));
+        retries++;
+      }
+      if (_isSyncing) return false;
+    }
     _isSyncing = true;
 
     try {
@@ -140,7 +151,7 @@ Future<bool> syncPending({required String branchId}) async {
           return true;
         }
 
-        final pending = allPending.take(50).toList();
+        final pending = allPending.take(15).toList();
 
         final List<int> ids = [];
         final List<Map<String, dynamic>> upsertItems = [];
@@ -158,17 +169,10 @@ Future<bool> syncPending({required String branchId}) async {
           Map<String, dynamic> payload = {};
           try {
             payload = jsonDecode(payloadText) as Map<String, dynamic>;
-            
-            // FRONTEND SANITIZATION: Truncate the 'type' string if it exists
-            if (payload['type'] != null) {
-              String typeStr = payload['type'].toString();
-              if (typeStr.length > 50) {
-                payload['type'] = typeStr.substring(0, 50);
-              }
-            }
           } catch (e) {
             debugPrint('Invalid JSON payload for ID $id: $e');
-            continue; // Skip corrupted rows instead of crashing the whole sync
+            await DBHelper.markQueueError(id, "Invalid JSON payload");
+            continue;
           }
 
           ids.add(id);
@@ -206,7 +210,7 @@ Future<bool> syncPending({required String branchId}) async {
                 'history': history,
               }),
             )
-            .timeout(const Duration(seconds: 60));
+            .timeout(const Duration(seconds: 120));
 
         debugPrint('SYNC response: ${response.statusCode} ${response.body}');
 
@@ -215,21 +219,25 @@ Future<bool> syncPending({required String branchId}) async {
             final body = jsonDecode(response.body);
             if (body['success'] == true) {
               await DBHelper.markQueueSynced(ids);
-              continue; // Move to the next batch of 50
+              continue;
             } else {
-              // ARCHITECTURAL FIX: Batch failed. Unpack and sync one-by-one to isolate the bad row.
-              debugPrint('Batch failed. Falling back to individual sync for ${pending.length} items...');
+              debugPrint('Batch failed. Falling back to individual sync...');
               await _syncIndividually(pending, branchId);
-              continue; // Continue the while loop to get the next batch from DB
+              continue;
             }
           } catch (e) {
-            debugPrint('Sync failed: Expected JSON, got HTML/Text. $e');
-            _isSyncing = false;
-            return false;
+            debugPrint('Sync failed: Expected JSON, got HTML. $e');
+            // FIX: If the server returns an HTML error page, fall back to individual sync
+            await _syncIndividually(pending, branchId);
+            continue;
           }
         } else {
-          _isSyncing = false;
-          return false;
+          // FIX: Do not abort on 500 Server Errors! Fall back to isolate the bad row.
+          debugPrint(
+            'Batch HTTP ${response.statusCode}. Falling back to individual sync...',
+          );
+          await _syncIndividually(pending, branchId);
+          continue;
         }
       }
     } on TimeoutException catch (e) {
@@ -246,62 +254,78 @@ Future<bool> syncPending({required String branchId}) async {
       return false;
     }
   }
-  
-  // New helper method for fallback synchronization
-  Future<void> _syncIndividually(List<Map<String, dynamic>> pendingRows, String branchId) async {
+
+  Future<void> _syncIndividually(
+    List<Map<String, dynamic>> pendingRows,
+    String branchId,
+  ) async {
     for (final row in pendingRows) {
       final id = row['id'] as int;
       final entityType = row['entityType']?.toString() ?? '';
       final operation = row['operation']?.toString() ?? '';
-      
+
       Map<String, dynamic> payload = {};
       try {
         payload = jsonDecode(row['payload']?.toString() ?? '{}');
-        // Apply the same truncation rule here
-        if (payload['type'] != null && payload['type'].toString().length > 50) {
-          payload['type'] = payload['type'].toString().substring(0, 50);
-        }
       } catch (e) {
+        // FIX: Mark queue error so bad JSON doesn't cause an infinite loop
+        await DBHelper.markQueueError(id, "Invalid JSON payload");
         continue;
       }
 
       Map<String, dynamic> requestBody = {
         'deviceId': 'flutter-device-$branchId',
-        'items': [], 'editItems': [], 'deleteItems': [], 'sales': [], 'history': []
+        'items': [],
+        'editItems': [],
+        'deleteItems': [],
+        'sales': [],
+        'history': [],
       };
 
       if (entityType == 'item') {
-        if (operation == 'delete') requestBody['deleteItems'] = [payload['barcode']?.toString() ?? ''];
-        else if (operation == 'edit') requestBody['editItems'] = [payload];
-        else requestBody['items'] = [payload];
+        if (operation == 'delete')
+          requestBody['deleteItems'] = [payload['barcode']?.toString() ?? ''];
+        else if (operation == 'edit')
+          requestBody['editItems'] = [payload];
+        else
+          requestBody['items'] = [payload];
       } else if (entityType == 'sale') {
         requestBody['sales'] = [payload];
       } else if (entityType == 'history') {
         requestBody['history'] = [payload];
       }
-
       try {
         final uri = Uri.parse('$baseUrl/api/$branchId/sync');
-        final response = await http.post(
-          uri,
-          headers: {'Content-Type': 'application/json', 'x-api-key': apiKey},
-          body: jsonEncode(requestBody),
-        ).timeout(const Duration(seconds: 15));
+        final response = await http
+            .post(
+              uri,
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+              },
+              body: jsonEncode(requestBody),
+            )
+            .timeout(const Duration(seconds: 15));
 
         if (response.statusCode >= 200 && response.statusCode < 300) {
           final body = jsonDecode(response.body);
           if (body['success'] == true) {
-             await DBHelper.markQueueSynced([id]);
+            await DBHelper.markQueueSynced([id]);
           } else {
-             // THIS IS THE BAD ROW. Mark it as error so it doesn't block future syncs.
-             debugPrint('Row $id permanently failed to sync. Error: ${body['error']}');
-             await DBHelper.markQueueError(id, body['error'].toString()); 
+            await DBHelper.markQueueError(id, body['error'].toString());
           }
+        } else {
+          debugPrint(
+            'Server rejected transaction $id. Status: ${response.statusCode}',
+          );
+          throw Exception(
+            'Server error ${response.statusCode}. Aborting to protect data.',
+          );
         }
       } catch (e) {
         debugPrint('Network error on individual sync for ID $id: $e');
-        // Break individual sync on network errors to retry next cycle
-        break; 
+
+        break;
       }
     }
   }
