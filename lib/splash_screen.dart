@@ -24,7 +24,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final packageInfo = await PackageInfo.fromPlatform();
     if (mounted) {
       setState(() {
-        _appVersion = 'v${packageInfo.version}'; // e.g., "v2.1.0"
+        _appVersion = 'Version: ${packageInfo.version}'; // e.g., "v2.1.0"
       });
     }
     await Future.delayed(const Duration(milliseconds: 800)); // brief splash
@@ -48,29 +48,63 @@ class _SplashScreenState extends State<SplashScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return  Scaffold(
-      backgroundColor: Color(0xFFF6F6F6),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-            const Icon(Icons.store, size: 80, color: Colors.amber),
-            const SizedBox(height: 16),
-            const Text('Welcome to Nguwar',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 24),
-            const CircularProgressIndicator(color: Colors.amber),
-            const SizedBox(height: 24), // Spacing before version
-            // Display the version fetched dynamically
-            Text(
-              _appVersion, 
-              style: const TextStyle(fontSize: 14, color: Colors.grey),
+@override
+Widget build(BuildContext context) {
+  return Scaffold(
+    backgroundColor: const Color(0xFFF6F6F6),
+    body: SafeArea(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Main splash content
+          const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.store,
+                  size: 80,
+                  color: Colors.amber,
+                ),
+                SizedBox(height: 16),
+                Text(
+                  'Welcome to Nguwar',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 24),
+                CircularProgressIndicator(
+                  color: Colors.amber,
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+
+          // Version number at the bottom
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: const EdgeInsets.only(
+                left: 16,
+                right: 16,
+                bottom: 16,
+              ),
+              child: Text(
+                _appVersion,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
-    );
-  }
+    ),
+  );
+}
 }

@@ -7,7 +7,7 @@ import 'package:uuid/uuid.dart';
 class DBHelper {
   static Database? _db;
 
-  static const int _dbVersion = 8;
+  static const int _dbVersion = 9;
   static const String defaultBranchId = 'nguwar_1';
 
   static final Uuid _uuid = Uuid();
@@ -123,6 +123,15 @@ class DBHelper {
         if (oldVersion < 8) {
           await _ensureSyncIdentityColumns(db);
         }
+        if (oldVersion < 9) {
+          try {
+            await db.execute(
+              'ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0',
+            );
+          } catch (_) {
+            // Ignore if column already exists
+          }
+        }
       },
     );
 
@@ -137,7 +146,8 @@ class DBHelper {
         quantity INTEGER DEFAULT 0,
         priceUnit REAL,
         trackStock INTEGER DEFAULT 1,
-        saleEffect INTEGER DEFAULT 1
+        saleEffect INTEGER DEFAULT 1,
+        isDeleted INTEGER DEFAULT 0 
       )
     ''');
 
@@ -182,6 +192,7 @@ class DBHelper {
     final columns = await db.rawQuery("PRAGMA table_info(items)");
     final hasTrackStock = columns.any((col) => col['name'] == 'trackStock');
     final hasSaleEffect = columns.any((col) => col['name'] == 'saleEffect');
+    final hasIsDeleted = columns.any((col) => col['name'] == 'isDeleted');
 
     if (!hasTrackStock) {
       await db.execute(
@@ -194,9 +205,14 @@ class DBHelper {
         'ALTER TABLE items ADD COLUMN saleEffect INTEGER DEFAULT 1',
       );
     }
+    if (!hasIsDeleted) {
+      await db.execute(
+        'ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0',
+      );
+    }
   }
 
- static String _now() => DateTime.now().toUtc().toIso8601String();
+  static String _now() => DateTime.now().toUtc().toIso8601String();
 
   static Future<void> _insertSyncQueue(
     DatabaseExecutor executor, {
@@ -245,38 +261,40 @@ class DBHelper {
   }
 
   static Future<List<Map<String, dynamic>>> getItemHistoryPaginated({
-  required int limit,
-  required int offset,
-}) async {
-  final db = await database;
+    required int limit,
+    required int offset,
+  }) async {
+    final db = await database;
 
-  final rows = await db.query(
-    'item_history',
-    orderBy: 'createdAt DESC',
-    limit: limit,
-    offset: offset,
-  );
+    final rows = await db.query(
+      'item_history',
+      orderBy: 'createdAt DESC',
+      limit: limit,
+      offset: offset,
+    );
 
-  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-}
-static Future<List<Map<String, dynamic>>> getSalesPaginated({
-  required int limit,
-  required int offset,
-  String? saleDate,
-}) async {
-  final db = await database;
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
 
-  final rows = await db.query(
-    'sales',
-    where: saleDate == null ? null : "substr(saleDate, 1, 10) = ?",
-    whereArgs: saleDate == null ? null : [saleDate],
-    orderBy: 'saleDate DESC',
-    limit: limit,
-    offset: offset,
-  );
+  static Future<List<Map<String, dynamic>>> getSalesPaginated({
+    required int limit,
+    required int offset,
+    String? saleDate,
+  }) async {
+    final db = await database;
 
-  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-}
+    final rows = await db.query(
+      'sales',
+      where: saleDate == null ? null : "substr(saleDate, 1, 10) = ?",
+      whereArgs: saleDate == null ? null : [saleDate],
+      orderBy: 'saleDate DESC',
+      limit: limit,
+      offset: offset,
+    );
+
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
   static Future<void> markQueueSynced(List<int> ids) async {
     if (ids.isEmpty) return;
 
@@ -288,14 +306,15 @@ static Future<List<Map<String, dynamic>>> getSalesPaginated({
       ids,
     );
   }
-static Future<List<Map<String, dynamic>>> getSaleDateSummariesPaginated({
-  required int limit,
-  required int offset,
-}) async {
-  final db = await database;
 
-  final rows = await db.rawQuery(
-    '''
+  static Future<List<Map<String, dynamic>>> getSaleDateSummariesPaginated({
+    required int limit,
+    required int offset,
+  }) async {
+    final db = await database;
+
+    final rows = await db.rawQuery(
+      '''
     SELECT
       substr(saleDate, 1, 10) AS dateKey,
       COUNT(*) AS transactionCount,
@@ -307,17 +326,19 @@ static Future<List<Map<String, dynamic>>> getSaleDateSummariesPaginated({
     ORDER BY dateKey DESC
     LIMIT ? OFFSET ?
     ''',
-    [limit, offset],
-  );
+      [limit, offset],
+    );
 
-  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-}
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
 
-static Future<Map<String, dynamic>?> getSaleDateSummary(String saleDate) async {
-  final db = await database;
+  static Future<Map<String, dynamic>?> getSaleDateSummary(
+    String saleDate,
+  ) async {
+    final db = await database;
 
-  final rows = await db.rawQuery(
-    '''
+    final rows = await db.rawQuery(
+      '''
     SELECT
       substr(saleDate, 1, 10) AS dateKey,
       COUNT(*) AS transactionCount,
@@ -326,28 +347,30 @@ static Future<Map<String, dynamic>?> getSaleDateSummary(String saleDate) async {
     WHERE substr(saleDate, 1, 10) = ?
     GROUP BY substr(saleDate, 1, 10)
     ''',
-    [saleDate],
-  );
+      [saleDate],
+    );
 
-  if (rows.isEmpty) return null;
+    if (rows.isEmpty) return null;
 
-  return Map<String, dynamic>.from(rows.first);
-}
+    return Map<String, dynamic>.from(rows.first);
+  }
 
-static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async {
-  final db = await database;
+  static Future<List<Map<String, dynamic>>> getSalesByDate(
+    String saleDate,
+  ) async {
+    final db = await database;
 
-  final rows = await db.query(
-    'sales',
-    where: 'substr(saleDate, 1, 10) = ?',
-    whereArgs: [saleDate],
-    orderBy: 'saleDate DESC',
-  );
+    final rows = await db.query(
+      'sales',
+      where: 'substr(saleDate, 1, 10) = ?',
+      whereArgs: [saleDate],
+      orderBy: 'saleDate DESC',
+    );
 
-  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-}
-    static Future<void> markQueueError(int id, String errorMsg) async {
-  
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  static Future<void> markQueueError(int id, String errorMsg) async {
     print('Sync failed for ID $id: $errorMsg. Keeping in queue to retry.');
   }
 
@@ -397,11 +420,16 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
       String action = 'Added Item';
       int historyQty = trackStock == 1 ? incomingQty : 0;
 
+      // NEW: We need a variable to hold the absolute total to send to the server
+      int finalAbsoluteQty = trackStock == 1 ? incomingQty : 0;
+
       if (existing.isNotEmpty) {
         final oldItem = existing.first;
         final int currentQty = (oldItem['quantity'] as num?)?.toInt() ?? 0;
 
+        // Calculate the sum
         final int updatedQty = trackStock == 1 ? currentQty + incomingQty : 0;
+        finalAbsoluteQty = updatedQty; // Save it to push to the server later
 
         await txn.update(
           'items',
@@ -411,6 +439,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
             'priceUnit': priceUnit,
             'trackStock': trackStock,
             'saleEffect': saleEffect,
+            'isDeleted': 0,
           },
           where: 'barcode = ?',
           whereArgs: [barcode],
@@ -422,7 +451,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
         await txn.insert('items', {
           'barcode': barcode,
           'name': name,
-          'quantity': trackStock == 1 ? incomingQty : 0,
+          'quantity': finalAbsoluteQty,
           'priceUnit': priceUnit,
           'trackStock': trackStock,
           'saleEffect': saleEffect,
@@ -443,6 +472,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
 
       await txn.insert('item_history', historyPayload);
 
+      // FIXED: Push the absolute total quantity to the server!
       await _insertSyncQueue(
         txn,
         entityType: 'item',
@@ -450,10 +480,11 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
         payload: {
           'barcode': barcode,
           'name': name,
-          'quantity': incomingQty,
+          'quantity': finalAbsoluteQty, // <--- Now it sends 20 instead of 10!
           'priceUnit': priceUnit,
           'trackStock': trackStock,
           'saleEffect': saleEffect,
+          'isDeleted': 0,
         },
         branchId: branchId,
       );
@@ -468,31 +499,38 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
     });
   }
 
-  static Future<List<Map<String, Object?>>> getItems() async {
+    static Future<List<Map<String, Object?>>> getItems() async {
     final db = await database;
-    return db.query('items', orderBy: 'name ASC');
+    final rows = await db.rawQuery(
+      'SELECT * FROM items WHERE isDeleted IS NULL OR isDeleted = 0 ORDER BY name ASC'
+    );
+    
+    // Force a deep copy of the list so Flutter's state management physically sees a new object
+    return rows.map((row) => Map<String, Object?>.from(row)).toList();
   }
+
   static Future<List<Map<String, dynamic>>> getItemsPaginated({
-  required int limit,
-  required int offset,
-}) async {
-  final db = await database;
+    required int limit,
+    required int offset,
+  }) async {
+    final db = await database;
 
-  final rows = await db.query(
-    'items',
-    orderBy: 'name ASC',
-    limit: limit,
-    offset: offset,
-  );
+    final rows = await db.query(
+      'items',
+      where: 'isDeleted = 0',
+      orderBy: 'name ASC',
+      limit: limit,
+      offset: offset,
+    );
 
-  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-}
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
 
   static Future<Map<String, Object?>?> getItemByBarcode(String barcode) async {
     final db = await database;
     final maps = await db.query(
       'items',
-      where: 'barcode = ?',
+      where: 'barcode = ? AND isDeleted = 0',
       whereArgs: [barcode],
     );
 
@@ -660,16 +698,19 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
     final existing = await getItemByBarcode(barcode);
 
     await db.transaction((txn) async {
-      await txn.delete('items', where: 'barcode = ?', whereArgs: [barcode]);
-
+      await txn.update(
+        'items',
+        {'isDeleted': 1, 'quantity': 0},
+        where: 'barcode = ?',
+        whereArgs: [barcode],
+      );
       await _insertSyncQueue(
         txn,
         entityType: 'item',
         operation: 'delete',
-        payload: {'barcode': barcode},
+        payload: {'barcode': barcode, 'isDeleted': 1},
         branchId: branchId,
       );
-
       if (existing != null) {
         final historyPayload = {
           'clientId': _newClientId('history'),
@@ -726,7 +767,7 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
     );
   }
 
-  // Upsert item from server (no sync queue — data already on server)
+  // Replace this entire method in db_helper.dart
   static Future<void> upsertItemFromServer(Map<String, dynamic> item) async {
     final db = await database;
 
@@ -738,6 +779,16 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
         int.tryParse(item['quantity']?.toString() ?? '0') ??
         0;
 
+    // Bulletproof parser for the server's deleted status
+    int isDeleted = 0;
+    final rawIsDeleted = item['isDeleted'];
+    if (rawIsDeleted != null) {
+      final strVal = rawIsDeleted.toString().toLowerCase();
+      if (strVal == '1' || strVal == 'true' || strVal.contains('1')) {
+        isDeleted = 1;
+      }
+    }
+
     final data = {
       'barcode': barcode,
       'name': item['name']?.toString() ?? '',
@@ -745,13 +796,28 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
       'priceUnit': double.tryParse(item['priceUnit']?.toString() ?? '0') ?? 0.0,
       'trackStock': (item['trackStock'] as num?)?.toInt() ?? 1,
       'saleEffect': (item['saleEffect'] as num?)?.toInt() ?? 1,
+      'isDeleted': isDeleted,
     };
 
-    await db.insert(
+    // 1. Check if the item already exists in the local database
+    final existing = await db.query(
       'items',
-      data,
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      where: 'barcode = ?',
+      whereArgs: [barcode],
     );
+
+    if (existing.isNotEmpty) {
+      // 2. EXPLICIT UPDATE: Forces the local database to accept isDeleted = 1
+      await db.update(
+        'items',
+        data,
+        where: 'barcode = ?',
+        whereArgs: [barcode],
+      );
+    } else {
+      // 3. INSERT: For new items or when logging back in
+      await db.insert('items', data);
+    }
   }
 
   static Future<void> upsertHistoryFromServer(Map<String, dynamic> h) async {
@@ -873,7 +939,6 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
         return;
       }
     }
-  
 
     await db.insert('sales', data, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
@@ -882,7 +947,6 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
     final db = await database;
     return db.query('sales', orderBy: 'saleDate DESC');
   }
-  
 
   static Future<void> deleteSale(int id) async {
     final db = await database;
@@ -896,9 +960,9 @@ static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async 
     }
   }
 
-  static Future<void> cleanupDuplicateSyncedRows([Database? existingDb]) async {
-    
-  }
+  static Future<void> cleanupDuplicateSyncedRows([
+    Database? existingDb,
+  ]) async {}
 
   static Future<void> clearLocalData() async {
     final db = await database;

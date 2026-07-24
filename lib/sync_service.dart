@@ -1,9 +1,7 @@
 import 'dart:convert';
-
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-
 import 'db_helper.dart';
 import 'dart:io';
 import 'dart:async';
@@ -35,7 +33,7 @@ class SyncService {
     return pulled;
   }
 
-  Future<bool> pullFromServer({required String branchId}) async {
+   Future<bool> pullFromServer({required String branchId}) async {
     try {
       debugPrint('>>> pullFromServer start: $branchId');
 
@@ -49,7 +47,6 @@ class SyncService {
             .get(itemsUri, headers: {'x-api-key': apiKey})
             .timeout(const Duration(seconds: 60)); // ← shorter timeout
         debugPrint('>>> items status: ${itemsRes.statusCode}');
-        debugPrint('>>> items body: ${itemsRes.body}');
       } catch (e) {
         debugPrint('>>> items request failed: $e');
         itemsRes = http.Response('{}', 500);
@@ -60,10 +57,56 @@ class SyncService {
         if (body['success'] == true) {
           final List items = body['data'] as List? ?? [];
           debugPrint('>>> items count: ${items.length}');
+          
+          // 1. Gather all barcodes the server ACTUALLY sent us
+          final Set<String> serverBarcodes = {};
+          
           for (final item in items) {
+            final barcode = item['barcode']?.toString() ?? '';
+            if (barcode.isNotEmpty) {
+               serverBarcodes.add(barcode);
+            }
+            
             await DBHelper.upsertItemFromServer(
               Map<String, dynamic>.from(item),
             );
+          }
+
+          final Set<String> pendingBarcodes = {};
+          final pendingQueue = await DBHelper.getPendingSyncQueue(branchId);
+          for (final row in pendingQueue) {
+            if (row['entityType'] == 'item') {
+              try {
+                final payloadText = row['payload']?.toString() ?? '{}';
+                final payload = jsonDecode(payloadText) as Map<String, dynamic>;
+                final barcode = payload['barcode']?.toString() ?? '';
+                if (barcode.isNotEmpty) {
+                  pendingBarcodes.add(barcode);
+                }
+              } catch (_) {}
+            }
+          }
+
+              // 3. HARD DELETE missing local items
+          final localItems = await DBHelper.getItems();
+          
+          final db = await DBHelper.database; 
+          
+          for (final localItem in localItems) {
+            final localBarcode = localItem['barcode']?.toString() ?? '';
+            
+            if (localBarcode.isNotEmpty && 
+                !serverBarcodes.contains(localBarcode) && 
+                !pendingBarcodes.contains(localBarcode)) {
+                  
+              // Silently hard-delete it locally
+              await db.delete(
+                'items', 
+                where: 'barcode = ?', 
+                whereArgs: [localBarcode],
+              );
+              debugPrint('>>> Hard deleted local item because server dropped it: $localBarcode');
+            }
           }
         }
       }
@@ -129,7 +172,6 @@ class SyncService {
       return false;
     }
   }
-
   Future<bool> syncPending({required String branchId}) async {
     // FIX: Wait briefly if a background sync (via connectivity listener) is already running
     if (_isSyncing) {

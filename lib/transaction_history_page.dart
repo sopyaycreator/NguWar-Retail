@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'db_helper.dart';
 
 class TransactionHistoryPage extends StatefulWidget {
-  const TransactionHistoryPage({super.key});
+  final bool isUnlocked;
+
+  const TransactionHistoryPage({super.key, required this.isUnlocked});
 
   @override
   State<TransactionHistoryPage> createState() => _TransactionHistoryPageState();
@@ -327,15 +329,9 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     required Color color,
   }) {
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        vertical: 8.0,
-        horizontal: 4.0,
-      ),
+      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
       child: Container(
-        padding: const EdgeInsets.symmetric(
-          horizontal: 10,
-          vertical: 4,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
           color: color,
           borderRadius: BorderRadius.circular(4),
@@ -383,11 +379,13 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
         final List<Map<String, dynamic>> dailySales =
             _salesByDate[dateHeader] ?? [];
 
-        final Map<String, int> itemTotals =
-            _buildItemTotalsForSales(dailySales);
+        final Map<String, int> itemTotals = _buildItemTotalsForSales(
+          dailySales,
+        );
 
-        final List<MapEntry<String, int>> entries =
-            _filterSoldItemEntries(itemTotals);
+        final List<MapEntry<String, int>> entries = _filterSoldItemEntries(
+          itemTotals,
+        );
 
         final double dailyAmount = _toDouble(summary['totalAmount']);
 
@@ -488,10 +486,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                 margin: const EdgeInsets.only(bottom: 6),
                 child: ListTile(
                   dense: true,
-                  leading: const Icon(
-                    Icons.receipt_long,
-                    color: Colors.green,
-                  ),
+                  leading: const Icon(Icons.receipt_long, color: Colors.green),
                   title: Text(
                     "${saleRecord['type']}",
                     style: const TextStyle(fontWeight: FontWeight.w500),
@@ -625,22 +620,22 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                   child: _isInitialLoading
                       ? const Center(child: CircularProgressIndicator())
                       : _dateSummaries.isEmpty
-                          ? ListView(
-                              physics: const AlwaysScrollableScrollPhysics(),
-                              children: [
-                                const SizedBox(height: 100),
-                                Center(
-                                  child: Text(
-                                    _emptyMessage(),
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(color: Colors.grey),
-                                  ),
-                                ),
-                              ],
-                            )
-                          : _showDailyItemTotals
-                              ? _buildDailyItemTotalsView()
-                              : _buildFullArchiveView(),
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: [
+                            const SizedBox(height: 100),
+                            Center(
+                              child: Text(
+                                _emptyMessage(),
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.grey),
+                              ),
+                            ),
+                          ],
+                        )
+                      : _showDailyItemTotals
+                      ? _buildDailyItemTotalsView()
+                      : _buildFullArchiveView(),
                 ),
               ),
             ],

@@ -2,13 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:nguwar/auth_service.dart';
 import 'package:nguwar/login_screen.dart';
-
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:nguwar/splash_screen.dart';
 import 'package:nguwar/transaction_history_page.dart';
 import 'db_helper.dart';
 import 'item_history_page.dart';
 import 'sync_service.dart';
 import 'dart:io';
+import 'dart:async';
+import 'package:csv/csv.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:file_saver/file_saver.dart';
+
 
 void main() {
   runApp(const MyApp());
@@ -88,10 +94,11 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController _inventoryPasswordController =
       TextEditingController();
 
-  // Change this password as you want.
   static const String _inventoryEditPassword = "5408098";
 
   List<Map<String, Object?>> _inventoryItems = [];
+
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
 
   @override
   void initState() {
@@ -117,6 +124,23 @@ class _HomePageState extends State<HomePage> {
       if (pulled && mounted) {
         await _loadInventoryItems();
         setState(() {});
+      }
+    });
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((
+      List<ConnectivityResult> results,
+    ) async {
+      if (results.contains(ConnectivityResult.mobile) ||
+          results.contains(ConnectivityResult.wifi) ||
+          results.contains(ConnectivityResult.ethernet)) {
+        bool isOnline = await _checkInternetConnection();
+        if (isOnline) {
+          debugPrint("Network restored! Pushing pending data to server...");
+          await _syncService.syncPending(branchId: _currentBranch);
+
+          if (mounted) {
+            await _loadInventoryItems();
+          }
+        }
       }
     });
   }
@@ -145,6 +169,7 @@ class _HomePageState extends State<HomePage> {
     _inventorySearchController.dispose();
     _transactionLogsScrollController.dispose();
     _basketPageController.dispose();
+    _connectivitySubscription.cancel();
     super.dispose();
   }
 
@@ -342,14 +367,33 @@ class _HomePageState extends State<HomePage> {
       _clearDrawerFields(resetTrackStock: true);
       Navigator.of(context).pop();
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("✅ Item saved successfully!"),
-          backgroundColor: Colors.green,
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.green.shade50,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: Colors.green),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.wifi, color: Colors.green),
+              SizedBox(width: 8),
+              Text("Online", style: TextStyle(color: Colors.green)),
+            ],
+          ),
+          content: const Text(
+            "Save Successfully. Don't forget to click refresh button.",
+            style: TextStyle(color: Colors.black87),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text("OK", style: TextStyle(color: Colors.green)),
+            ),
+          ],
         ),
       );
-
-      setState(() {});
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -433,10 +477,10 @@ class _HomePageState extends State<HomePage> {
       (element) => element['barcode'] == barcode,
     );
 
-    if (basketIndex == -1 && _activeCart.length >= 10) {
+    if (basketIndex == -1 && _activeCart.length >= 20) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("⚠️ Basket is full! Maximum 10 unique items allowed."),
+          content: Text("⚠️ Basket is full! Maximum 20 unique items allowed."),
           backgroundColor: Colors.red,
           duration: Duration(seconds: 3),
         ),
@@ -556,15 +600,129 @@ class _HomePageState extends State<HomePage> {
         children: [
           GestureDetector(
             onTap: () {
-              Navigator.of(context)
-                  .push(
-                    MaterialPageRoute(
-                      builder: (context) => const TransactionHistoryPage(),
+              if (_editUnlocked) {
+                Navigator.of(context)
+                    .push(
+                      MaterialPageRoute(
+                        builder: (context) =>
+                            TransactionHistoryPage(isUnlocked: _editUnlocked),
+                      ),
+                    )
+                    .then((_) async {
+                      await _loadInitialTransactionLogs();
+                    });
+                return;
+              }
+              showDialog(
+                context: context,
+                builder: (dialogCtx) => AlertDialog(
+                  scrollable:
+                      true, // Prevents bottom overflow when keyboard opens
+                  title: const Row(
+                    children: [
+                      Icon(Icons.security, color: Color(0xFFFF6F00), size: 20),
+                      SizedBox(width: 8),
+                      Text(
+                        "Admin Authentication",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: Color(0xFFFF6F00),
+                        ),
+                      ),
+                    ],
+                  ),
+                  content: TextField(
+                    controller: _inventoryPasswordController,
+                    obscureText: true,
+                    keyboardType: TextInputType.number,
+                    style: const TextStyle(
+                      letterSpacing: 4.0,
+                      fontWeight: FontWeight.bold,
                     ),
-                  )
-                  .then((_) async {
-                    await _loadInitialTransactionLogs();
-                  });
+                    decoration: InputDecoration(
+                      hintText: "Enter PIN",
+                      hintStyle: const TextStyle(
+                        letterSpacing:
+                            0, // Reset letter spacing for the hint text
+                        fontWeight: FontWeight.normal,
+                        color: Colors.grey,
+                      ),
+                      filled: true,
+                      fillColor: Colors.white,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      prefixIcon: const Icon(
+                        Icons.lock_outline,
+                        color: Colors.grey,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(
+                          color: Colors.amber.shade600,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () {
+                        _inventoryPasswordController.clear();
+                        Navigator.of(dialogCtx).pop(); // Close dialog
+                      },
+                      child: const Text("Cancel"),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amber.shade600,
+                        foregroundColor: Colors.black87,
+                      ),
+                      onPressed: () {
+                        // Check password
+                        final String password = _inventoryPasswordController
+                            .text
+                            .trim();
+                        if (password == _inventoryEditPassword) {
+                          setState(() {
+                            _editUnlocked = true;
+                            _showInventoryPasswordBox = false;
+                          });
+                          _inventoryPasswordController.clear();
+                          Navigator.of(dialogCtx).pop(); // Close dialog
+
+                          // Navigate to history page after successful unlock
+                          Navigator.of(context)
+                              .push(
+                                MaterialPageRoute(
+                                  builder: (context) => TransactionHistoryPage(
+                                    isUnlocked: _editUnlocked,
+                                  ),
+                                ),
+                              )
+                              .then((_) async {
+                                await _loadInitialTransactionLogs();
+                              });
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text("Wrong password"),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                      },
+                      child: const Text("Unlock"),
+                    ),
+                  ],
+                ),
+              );
             },
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
@@ -812,18 +970,41 @@ class _HomePageState extends State<HomePage> {
     );
 
     if (confirmed != true) return;
-
     await DBHelper.deleteItem(barcode, branchId: _currentBranch);
-    await _loadInventoryItems(); // ← refresh UI immediately
 
-    // Immediately push delete to server
     await _syncService.syncPending(branchId: _currentBranch);
 
+    await _loadInventoryItems();
+
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Item deleted successfully"),
-        backgroundColor: Colors.red,
+
+    setState(() {});
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.green.shade50,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: Colors.green),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.wifi, color: Colors.green),
+            SizedBox(width: 8),
+            Text("Delete Success", style: TextStyle(color: Colors.green)),
+          ],
+        ),
+        content: const Text(
+          "Deleted Successfully. Don't forget to click refresh button.",
+          style: TextStyle(color: Colors.black87),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text("OK", style: TextStyle(color: Colors.green)),
+          ),
+        ],
       ),
     );
   }
@@ -959,7 +1140,10 @@ class _HomePageState extends State<HomePage> {
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  onPressed: () {
+                    FocusScope.of(dialogContext).unfocus(); // Safe unfocus
+                    Navigator.of(dialogContext).pop(false);
+                  },
                   child: const Text("Cancel"),
                 ),
                 ElevatedButton.icon(
@@ -995,13 +1179,11 @@ class _HomePageState extends State<HomePage> {
                         branchId: _currentBranch,
                       );
 
-                      await Future.delayed(const Duration(milliseconds: 100));
-
+                      await Future.delayed(const Duration(milliseconds: 250));
                       if (dialogContext.mounted) {
                         Navigator.of(
                           dialogContext,
-                          rootNavigator: true,
-                        ).pop(true);
+                        ).pop(true); // Don't use rootNavigator: true here
                       }
                     } catch (e) {
                       if (!mounted) return;
@@ -1024,10 +1206,6 @@ class _HomePageState extends State<HomePage> {
       },
     );
 
-    nameController.dispose();
-    quantityController.dispose();
-    priceController.dispose();
-
     if (!mounted) return;
 
     if (saved == true) {
@@ -1039,10 +1217,31 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Item updated successfully"),
-            backgroundColor: Colors.green,
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: Colors.green.shade50,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: const BorderSide(color: Colors.green),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.wifi, color: Colors.green),
+                SizedBox(width: 8),
+                Text("Update Success", style: TextStyle(color: Colors.green)),
+              ],
+            ),
+            content: const Text(
+              "Updated Successfully. Don't forget to click refresh button.",
+              style: TextStyle(color: Colors.black87),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text("OK", style: TextStyle(color: Colors.green)),
+              ),
+            ],
           ),
         );
       });
@@ -1095,7 +1294,6 @@ class _HomePageState extends State<HomePage> {
       },
       backgroundColor: const Color(0xFFF6F6F6),
       appBar: AppBar(
-        // In your AppBar title:
         title: Text(
           _selectedIndex == 0
               ? "🛒 ${AuthService.currentUser?.shopName ?? 'Stock'}"
@@ -1107,11 +1305,11 @@ class _HomePageState extends State<HomePage> {
         backgroundColor: Colors.amber,
         actions: [
           IconButton(
-            icon: const Icon(Icons.sync, color: Colors.black87),
+            icon: const Icon(Icons.sync),
+            color: Colors.black87,
             tooltip: 'Sync with Server',
             onPressed: () async {
               bool isOnline = await _checkInternetConnection();
-
               if (!isOnline) {
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -1123,44 +1321,51 @@ class _HomePageState extends State<HomePage> {
                 }
                 return;
               }
-
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text("Syncing with server...")),
                 );
               }
 
-              // 1. Push local pending changes to the server
+              // 1. Push and Pull
               bool pushSuccess = await _syncService.syncPending(
                 branchId: _currentBranch,
               );
-
-              // 2. Pull new changes from the server (so Phone B gets Phone A's data)
               bool pullSuccess = await _syncService.pullFromServer(
                 branchId: _currentBranch,
               );
 
               if (mounted) {
-                // FIX 3: Identify exactly which operation failed
-                String errorMessage = "";
-                if (!pushSuccess) errorMessage += "Push failed. ";
-                if (!pullSuccess) errorMessage += "Pull failed.";
+                String errorMessage = '';
+                if (!pushSuccess) errorMessage += 'Push failed. ';
+                if (!pullSuccess) errorMessage += 'Pull failed.';
 
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                      (pushSuccess && pullSuccess)
-                          ? "✅ Sync Complete"
-                          : "⚠️ Sync finished with errors: $errorMessage",
+                      pushSuccess && pullSuccess
+                          ? "Sync Complete"
+                          : "Sync finished with errors: $errorMessage",
                     ),
-                    backgroundColor: (pushSuccess && pullSuccess)
+                    backgroundColor: pushSuccess && pullSuccess
                         ? Colors.green
                         : Colors.orange,
                   ),
                 );
 
-                await _loadInventoryItems();
-                setState(() {});
+                // 2. FORCE UI REFRESH
+                final freshItems = await DBHelper.getItems();
+                setState(() {
+                  _inventoryItems = []; // clear first
+                });
+
+                await Future.delayed(
+                  const Duration(milliseconds: 50),
+                ); // let UI clear
+
+                setState(() {
+                  _inventoryItems = List.from(freshItems); // assign new
+                });
               }
             },
           ),
@@ -1185,7 +1390,6 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(width: 8),
           ],
-
           if (_selectedIndex == 2) ...[
             IconButton(
               tooltip: _editUnlocked ? "Lock edit mode" : "Unlock edit mode",
@@ -1307,49 +1511,54 @@ class _HomePageState extends State<HomePage> {
                         onPressed: () {
                           showDialog(
                             context: context,
-                            builder: (dialogCtx) => AlertDialog(
-                              title: const Text("Scan Stock Barcode"),
-                              content: SizedBox(
-                                width: double.maxFinite,
-                                height: 300,
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: MobileScanner(
-                                    onDetect: (BarcodeCapture capture) async {
-                                      final List<Barcode> barcodes =
-                                          capture.barcodes;
-                                      if (barcodes.isEmpty) return;
 
-                                      final String? code =
-                                          barcodes.first.rawValue;
-                                      if (code == null) return;
+                            builder: (dialogCtx) {
+                              return AlertDialog(
+                                title: const Text("Scan Stock Barcode"),
+                                content: SizedBox(
+                                  width: double.maxFinite,
+                                  height: 300,
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: MobileScanner(
+                                      onDetect: (BarcodeCapture capture) async {
+                                        final List<Barcode> barcodes =
+                                            capture.barcodes;
+                                        if (barcodes.isEmpty) return;
 
-                                      Navigator.of(dialogCtx).pop();
+                                        final String? code =
+                                            barcodes.first.rawValue;
+                                        if (code == null) return;
 
-                                      setState(() {
-                                        _barcodeController.text = code;
-                                      });
+                                        Navigator.of(dialogCtx).pop();
 
-                                      final matched =
-                                          await DBHelper.getItemByBarcode(code);
-
-                                      if (matched != null && mounted) {
                                         setState(() {
-                                          _fillDrawerWithMatchedItem(matched);
+                                          _barcodeController.text = code;
                                         });
-                                      }
-                                    },
+
+                                        final matched =
+                                            await DBHelper.getItemByBarcode(
+                                              code,
+                                            );
+
+                                        if (matched != null && mounted) {
+                                          setState(() {
+                                            _fillDrawerWithMatchedItem(matched);
+                                          });
+                                        }
+                                      },
+                                    ),
                                   ),
                                 ),
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () =>
-                                      Navigator.of(dialogCtx).pop(),
-                                  child: const Text("Cancel"),
-                                ),
-                              ],
-                            ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(dialogCtx).pop(),
+                                    child: const Text("Cancel"),
+                                  ),
+                                ],
+                              );
+                            },
                           );
                         },
                         icon: const Icon(Icons.camera_alt, color: Colors.amber),
@@ -1497,7 +1706,48 @@ class _HomePageState extends State<HomePage> {
                   width: double.infinity,
                   height: 52,
                   child: ElevatedButton.icon(
-                    onPressed: _saveItemFromDrawer,
+                    onPressed: () async {
+                      bool isOnline = await _checkInternetConnection();
+
+                      if (!mounted) return;
+                      if (!isOnline) {
+                        showDialog(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            backgroundColor: Colors.red.shade50,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              side: const BorderSide(color: Colors.red),
+                            ),
+                            title: const Row(
+                              children: [
+                                Icon(Icons.wifi_off, color: Colors.red),
+                                SizedBox(width: 8),
+                                Text(
+                                  "Offline",
+                                  style: TextStyle(color: Colors.red),
+                                ),
+                              ],
+                            ),
+                            content: const Text(
+                              "No internet connection. Please check your network and try again.",
+                              style: TextStyle(color: Colors.black87),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(ctx).pop(),
+                                child: const Text(
+                                  "OK",
+                                  style: TextStyle(color: Colors.red),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                        return; // Prevent saving
+                      }
+                      await _saveItemFromDrawer();
+                    },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.amber,
                       foregroundColor: Colors.black87,
@@ -1507,10 +1757,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                     icon: const Icon(Icons.save_rounded),
-                    label: const Text(
-                      "Save Item Data",
-                      style: TextStyle(fontSize: 16),
-                    ),
+                    label: const Text("Save", style: TextStyle(fontSize: 16)),
                   ),
                 ),
 
@@ -2029,13 +2276,36 @@ class _HomePageState extends State<HomePage> {
         padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                "📦 Inventory",
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "📦 Inventory",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                ElevatedButton.icon(
+                  onPressed: _exportInventoryToCSV,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber.shade300,
+                    foregroundColor: Colors.white,
+                    elevation: 1,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  icon: const Icon(Icons.download, size: 16),
+                  label: const Text(
+                    "Export Excel",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  ),
+                ),
+              ],
             ),
+
             const SizedBox(height: 10),
             TextField(
               controller: _inventorySearchController,
@@ -2069,40 +2339,128 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 10),
             if (_showInventoryPasswordBox && !_editUnlocked) ...[
               Card(
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(color: Colors.amber.shade300, width: 1.5),
+                ),
                 color: Colors.amber.shade50,
+                margin: const EdgeInsets.only(bottom: 12),
                 child: Padding(
-                  padding: const EdgeInsets.all(12.0),
+                  padding: const EdgeInsets.all(16.0),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // 1. Header Row
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.security,
+                            color: Colors.amber.shade900,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            "Admin Authentication",
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                              color: Colors.amber.shade900,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+
+                      // 2. Modern TextField
                       TextField(
                         controller: _inventoryPasswordController,
                         obscureText: true,
                         keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: "Admin password",
-                          border: OutlineInputBorder(),
-                          prefixIcon: Icon(Icons.lock),
+                        style: const TextStyle(
+                          letterSpacing: 4.0, // Spreads out the dots nicely
+                          fontWeight: FontWeight.bold,
+                        ),
+                        decoration: InputDecoration(
+                          hintText: "Enter PIN",
+                          hintStyle: const TextStyle(
+                            letterSpacing:
+                                0, // Reset letter spacing for the hint text
+                            fontWeight: FontWeight.normal,
+                            color: Colors.grey,
+                          ),
+                          filled: true,
+                          fillColor: Colors.white,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 14,
+                          ),
+                          prefixIcon: const Icon(
+                            Icons.lock_outline,
+                            color: Colors.grey,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none,
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              color: Colors.amber.shade600,
+                              width: 2,
+                            ),
+                          ),
                         ),
                         onSubmitted: (_) => _checkInventoryPassword(),
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 16),
+
+                      // 3. Styled Buttons
                       Row(
                         children: [
                           Expanded(
-                            child: OutlinedButton(
-                              onPressed: () => setState(() {
-                                _showInventoryPasswordBox = false;
-                                _inventoryPasswordController.clear();
-                              }),
-                              child: const Text("Cancel"),
+                            child: TextButton(
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.grey.shade700,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _showInventoryPasswordBox = false;
+                                  _inventoryPasswordController.clear();
+                                });
+                              },
+                              child: const Text(
+                                "Cancel",
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
                             ),
                           ),
-                          const SizedBox(width: 10),
+                          const SizedBox(width: 12),
                           Expanded(
                             child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.amber.shade600,
+                                foregroundColor: Colors.black87,
+                                elevation: 0,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
                               onPressed: _checkInventoryPassword,
-                              icon: const Icon(Icons.lock_open),
-                              label: const Text("Unlock"),
+                              icon: const Icon(Icons.lock_open, size: 18),
+                              label: const Text(
+                                "Unlock",
+                                style: TextStyle(fontWeight: FontWeight.bold),
+                              ),
                             ),
                           ),
                         ],
@@ -2114,154 +2472,329 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 10),
             ],
             Expanded(
-              child: _inventoryItems.isEmpty
-                  ? const Center(
-                      child: Text(
-                        "No products stored in database. Add them in the drawer.",
-                      ),
-                    )
-                  : Builder(
-                      builder: (_) {
-                        final storeItems = _inventoryItems.where((item) {
-                          final name =
-                              item['name']?.toString().toLowerCase() ?? '';
-                          final barcode =
-                              item['barcode']?.toString().toLowerCase() ?? '';
-                          return name.contains(_inventorySearchText) ||
-                              barcode.contains(_inventorySearchText);
-                        }).toList();
-
-                        if (storeItems.isEmpty) {
-                          return const Center(
+              child: RefreshIndicator(
+                onRefresh: () async {
+                  await _syncService.syncPending(branchId: _currentBranch);
+                  await _syncService.pullFromServer(branchId: _currentBranch);
+                  final freshItems = await DBHelper.getItems();
+                  setState(() {
+                    _inventoryItems = List.from(freshItems);
+                  });
+                  await _loadInventoryItems();
+                  setState(() {}); // Updates the tab instantly
+                },
+                child: _inventoryItems.isEmpty
+                    ? ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: const [
+                          SizedBox(height: 100),
+                          Center(
                             child: Text(
-                              "No matching products found.",
-                              style: TextStyle(color: Colors.grey),
+                              "No products stored in database. Add them in the drawer.",
                             ),
-                          );
-                        }
+                          ),
+                        ],
+                      )
+                    : Builder(
+                        builder: (_) {
+                          final storeItems = _inventoryItems.where((item) {
+                            final name =
+                                item['name']?.toString().toLowerCase() ?? '';
+                            final barcode =
+                                item['barcode']?.toString().toLowerCase() ?? '';
+                            return name.contains(_inventorySearchText) ||
+                                barcode.contains(_inventorySearchText);
+                          }).toList();
 
-                        return ListView.builder(
-                          itemCount: storeItems.length,
-                          itemBuilder: (context, index) {
-                            final item = storeItems[index];
-                            final int trackStock =
-                                (item['trackStock'] as num?)?.toInt() ?? 1;
-                            final int qty =
-                                (item['quantity'] as num?)?.toInt() ?? 0;
-                            final int saleEffect =
-                                (item['saleEffect'] as num?)?.toInt() ?? 1;
-                            final double priceUnit =
-                                double.tryParse(
-                                  item['priceUnit']?.toString() ?? '0',
-                                ) ??
-                                0.0;
-                            final String name =
-                                item['name']?.toString() ?? 'Unknown Item';
-                            final String barcode =
-                                item['barcode']?.toString() ?? '-';
-
-                            return Card(
-                              color: Colors.white,
-                              elevation: 0.5,
-                              child: ListTile(
-                                dense: true,
-                                title: Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
+                          if (storeItems.isEmpty) {
+                            return ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              children: const [
+                                SizedBox(height: 100),
+                                Center(
+                                  child: Text(
+                                    "No matching products found.",
+                                    style: TextStyle(color: Colors.grey),
                                   ),
                                 ),
-                                subtitle: Text("ID: $barcode"),
-                                trailing: _editUnlocked
-                                    ? Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          IconButton(
-                                            tooltip: "Edit",
-                                            icon: const Icon(
-                                              Icons.edit,
-                                              color: Colors.blue,
+                              ],
+                            );
+                          }
+
+                          return ListView.builder(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            itemCount: storeItems.length,
+                            itemBuilder: (context, index) {
+                              final item = storeItems[index];
+
+                              final int trackStock =
+                                  (item['trackStock'] as num?)?.toInt() ?? 1;
+                              final int qty =
+                                  (item['quantity'] as num?)?.toInt() ?? 0;
+                              final int saleEffect =
+                                  (item['saleEffect'] as num?)?.toInt() ?? 1;
+                              final double priceUnit =
+                                  double.tryParse(
+                                    item['priceUnit']?.toString() ?? '0',
+                                  ) ??
+                                  0.0;
+                              final String name =
+                                  item['name']?.toString() ?? 'Unknown Item';
+                              final String barcode =
+                                  item['barcode']?.toString() ?? '-';
+
+                              return Card(
+                                color: Colors.white,
+                                elevation: 0.5,
+                                child: ListTile(
+                                  dense: true,
+                                  title: Text(
+                                    name,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                  subtitle: Text("ID: $barcode"),
+                                  trailing: _editUnlocked
+                                      ? Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              tooltip: "Edit",
+                                              icon: const Icon(
+                                                Icons.edit,
+                                                color: Colors.blue,
+                                              ),
+                                              onPressed: () =>
+                                                  _showEditItemDialog(item),
                                             ),
-                                            onPressed: () =>
-                                                _showEditItemDialog(item),
-                                          ),
-                                          IconButton(
-                                            tooltip: "Delete",
-                                            icon: const Icon(
-                                              Icons.delete,
-                                              color: Colors.red,
+                                            IconButton(
+                                              tooltip: "Delete",
+                                              icon: const Icon(
+                                                Icons.delete,
+                                                color: Colors.red,
+                                              ),
+                                              onPressed: () =>
+                                                  _confirmDeleteItem(item),
                                             ),
-                                            onPressed: () =>
-                                                _confirmDeleteItem(item),
-                                          ),
-                                        ],
-                                      )
-                                    : Column(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.center,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.end,
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 10,
-                                              vertical: 4,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: trackStock == 1
-                                                  ? (qty > 0
-                                                        ? Colors.blue.shade50
-                                                        : Colors.red.shade50)
-                                                  : (saleEffect == -1
-                                                        ? Colors.red.shade50
-                                                        : Colors
-                                                              .orange
-                                                              .shade50),
-                                              borderRadius:
-                                                  BorderRadius.circular(8),
-                                            ),
-                                            child: Text(
-                                              trackStock == 1
-                                                  ? "Stock: $qty"
-                                                  : (saleEffect == -1
-                                                        ? "Deduct"
-                                                        : "Non-stock"),
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.bold,
+                                          ],
+                                        )
+                                      : Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.end,
+                                          children: [
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 10,
+                                                    vertical: 4,
+                                                  ),
+                                              decoration: BoxDecoration(
                                                 color: trackStock == 1
                                                     ? (qty > 0
-                                                          ? Colors.blue.shade900
-                                                          : Colors.red)
+                                                          ? Colors.blue.shade50
+                                                          : Colors.red.shade50)
                                                     : (saleEffect == -1
-                                                          ? Colors.red.shade900
+                                                          ? Colors.red.shade50
                                                           : Colors
                                                                 .orange
-                                                                .shade900),
+                                                                .shade50),
+                                                borderRadius:
+                                                    BorderRadius.circular(8),
+                                              ),
+                                              child: Text(
+                                                trackStock == 1
+                                                    ? "Stock: $qty"
+                                                    : (saleEffect == -1
+                                                          ? "Deduct"
+                                                          : "Non-stock"),
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  color: trackStock == 1
+                                                      ? (qty > 0
+                                                            ? Colors
+                                                                  .blue
+                                                                  .shade900
+                                                            : Colors.red)
+                                                      : (saleEffect == -1
+                                                            ? Colors
+                                                                  .red
+                                                                  .shade900
+                                                            : Colors
+                                                                  .orange
+                                                                  .shade900),
+                                                ),
                                               ),
                                             ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            "${priceUnit.toStringAsFixed(0)} MMK / each",
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: Colors.grey.shade600,
-                                              fontWeight: FontWeight.w500,
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              "${priceUnit.toStringAsFixed(0)} MMK / each",
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.grey.shade600,
+                                                fontWeight: FontWeight.w500,
+                                              ),
                                             ),
-                                          ),
-                                        ],
-                                      ),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
+                                          ],
+                                        ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+              ),
             ),
           ],
         ),
       ),
     );
+  }
+
+   Future<void> _exportInventoryToCSV() async {
+    try {
+      if (_inventoryItems.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No items to export.")),
+        );
+        return;
+      }
+
+      // 1. Create the CSV header row
+      List<List<dynamic>> rows = [
+        [
+          "Barcode ID",
+          "Product Name",
+          "Stock Quantity",
+          "Unit Price (MMK)",
+          "Stock Tracked",
+          "Sale Effect",
+        ],
+      ];
+
+      // 2. Add data rows
+      for (final item in _inventoryItems) {
+        final trackStock = (item['trackStock'] as num?)?.toInt() == 1 ? 'Yes' : 'No';
+        final saleEffect = (item['saleEffect'] as num?)?.toInt() == -1 ? 'Deduct' : 'Normal';
+        
+        final double price = (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
+
+        rows.add([
+          item['barcode']?.toString() ?? '',
+          item['name']?.toString() ?? '',
+          (item['quantity'] as num?)?.toInt() ?? 0,
+          price , // Hide price if locked
+          trackStock,
+          saleEffect,
+        ]);
+      }
+
+      // 3. Convert to CSV string
+      String csvData = const ListToCsvConverter().convert(rows);
+
+      // 4. Save to temporary file for sharing
+      final directory = await getTemporaryDirectory();
+      final String fileName = 'inventory_export_${DateTime.now().millisecondsSinceEpoch}';
+      final String filePath = '${directory.path}/$fileName.csv';
+      final File tempFile = File(filePath);
+      await tempFile.writeAsString(csvData);
+
+      if (!mounted) return;
+
+      // 5. Ask User: Share or Download?
+      showDialog(
+        context: context,
+        builder: (dialogCtx) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.file_present, color: Colors.amber),
+              SizedBox(width: 8),
+              Text("Export Inventory"),
+            ],
+          ),
+          content: const Text("How would you like to export this data?"),
+          actionsAlignment: MainAxisAlignment.spaceEvenly,
+          actions: [
+            // --- OPTION 1: SHARE ---
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.blue,
+                side: const BorderSide(color: Colors.blue),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () async {
+                Navigator.of(dialogCtx).pop(); // Close dialog first
+                
+                final result = await Share.shareXFiles([
+                  XFile(filePath),
+                ], text: 'Inventory Export');
+
+                if (result.status == ShareResultStatus.success && mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Shared successfully!")),
+                  );
+                }
+              },
+              icon: const Icon(Icons.share, size: 18),
+              label: const Text("Share File"),
+            ),
+
+                     // --- OPTION 2: DOWNLOAD TO PHONE ---
+                     // --- OPTION 2: DOWNLOAD TO PHONE ---
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.amber.shade600,
+                foregroundColor: Colors.black87,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onPressed: () async {
+                Navigator.of(dialogCtx).pop(); // Close dialog first
+
+                try {
+                  // CHANGED: Added the ext parameter as required by saveAs
+                  final resultPath = await FileSaver.instance.saveAs(
+                    name: fileName, // Use the base name, no .csv here
+                    bytes: await tempFile.readAsBytes(),
+                    fileExtension: 'csv', // Pass the extension here
+                    mimeType: MimeType.csv,
+                  );
+
+                  // If resultPath is null, the user cancelled the save dialog.
+                  if (resultPath != null && mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("✅ Saved successfully! Check your Files app."),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                } catch (saveError) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text("Save failed: $saveError"), backgroundColor: Colors.red),
+                    );
+                  }
+                }
+              },
+              icon: const Icon(Icons.download, size: 18),
+              label: const Text("Save to Phone"),
+            ),
+          ],
+        ),
+      );
+
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Export failed: $e"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 }
