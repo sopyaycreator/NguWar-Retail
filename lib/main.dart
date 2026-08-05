@@ -15,8 +15,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:file_saver/file_saver.dart';
 
-
 void main() {
+  HttpOverrides.global = MyHttpOverrides();
   runApp(const MyApp());
 }
 
@@ -76,7 +76,7 @@ class _HomePageState extends State<HomePage> {
   final PageController _basketPageController = PageController();
 
   int _activeBasketIndex = 0;
-
+  int? _matchedItemCurrentQty;
   final List<List<Map<String, dynamic>>> _baskets = [
     <Map<String, dynamic>>[],
     <Map<String, dynamic>>[],
@@ -116,14 +116,20 @@ class _HomePageState extends State<HomePage> {
         _loadMoreTransactionLogs();
       }
     });
+    // WidgetsBinding.instance.addPostFrameCallback((_) async {
+    //   await _syncService.syncPending(branchId: _currentBranch);
+    //   final pulled = await _syncService.pullFromServer(
+    //     branchId: _currentBranch,
+    //   );
+    //   if (pulled && mounted) {
+    //     await _loadInventoryItems();
+    //     setState(() {});
+    //   }
+    // });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _syncService.syncPending(branchId: _currentBranch);
-      final pulled = await _syncService.pullFromServer(
-        branchId: _currentBranch,
-      );
-      if (pulled && mounted) {
+      final ok = await _syncService.synchronize(branchId: _currentBranch);
+      if (ok && mounted) {
         await _loadInventoryItems();
-        setState(() {});
       }
     });
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((
@@ -530,51 +536,61 @@ class _HomePageState extends State<HomePage> {
     if (_activeCart.isEmpty) return;
 
     final List<String> itemSummaries = [];
+    final List<Map<String, dynamic>> stockLines = [];
     double orderGrandTotal = 0.0;
 
     for (final cartItem in _activeCart) {
       final String barcode = cartItem['barcode']?.toString() ?? '';
+      if (barcode.isEmpty) continue;
+
       final Map<String, Object?>? dbItem = await DBHelper.getItemByBarcode(
         barcode,
       );
+      if (dbItem == null) continue;
 
-      if (dbItem != null) {
-        final int trackStock = (dbItem['trackStock'] as num?)?.toInt() ?? 1;
-        final int originalStock = (dbItem['quantity'] as num?)?.toInt() ?? 0;
-        final int purchaseQty = (cartItem['quantity'] as num?)?.toInt() ?? 0;
-        final int saleEffect = (cartItem['saleEffect'] as num?)?.toInt() ?? 1;
-        final double priceUnit =
-            (cartItem['priceUnit'] as num?)?.toDouble() ?? 0.0;
-        final String name = cartItem['name']?.toString() ?? 'Unknown Item';
+      final int trackStock = (dbItem['trackStock'] as num?)?.toInt() ?? 1;
+      final int purchaseQty = (cartItem['quantity'] as num?)?.toInt() ?? 0;
+      final int saleEffect = (cartItem['saleEffect'] as num?)?.toInt() ?? 1;
+      final double priceUnit =
+          (cartItem['priceUnit'] as num?)?.toDouble() ?? 0.0;
+      final String name = cartItem['name']?.toString() ?? 'Unknown Item';
 
-        if (trackStock == 1) {
-          // Allow negative stock
-          final int absoluteNewStock = originalStock - purchaseQty;
+      if (purchaseQty <= 0) continue;
 
-          await DBHelper.updateItemQuantity(
-            barcode,
-            absoluteNewStock,
-            branchId: _currentBranch,
-          );
-        }
-
-        itemSummaries.add("${purchaseQty}x $name");
-        orderGrandTotal += priceUnit * purchaseQty * saleEffect;
+      // Only stock-tracked items move stock. Non-stock items (Ice, Lottery cap)
+      // still appear on the receipt and in the total.
+      if (trackStock == 1) {
+        stockLines.add({
+          'barcode': barcode,
+          'itemName': name,
+          'qty': purchaseQty, // insertSaleWithStock applies this as -qty
+        });
       }
+
+      itemSummaries.add("${purchaseQty}x $name");
+      orderGrandTotal += priceUnit * purchaseQty * saleEffect;
     }
 
-    await DBHelper.insertSale({
-      'type': itemSummaries.join(", "),
-      'price': orderGrandTotal,
-      'saleDate': DateTime.now().toIso8601String(),
-    }, branchId: _currentBranch);
+    // Sale + every stock movement, in ONE transaction. If the app is killed
+    // mid-checkout you get all of it or none of it — never a sale with no
+    // stock change, or stock gone with no sale to explain it.
+    await DBHelper.insertSaleWithStock(
+      sale: {
+        'type': itemSummaries.join(", "),
+        'price': orderGrandTotal,
+        'saleDate': DateTime.now().toUtc().toIso8601String(),
+      },
+      lines: stockLines,
+      branchId: _currentBranch,
+    );
 
     setState(() {
       _activeCart.clear();
     });
-    await _syncService.syncPending(
-      branchId: _currentBranch,
-    ); // push new stock to server
+
+    // Push only. The sync response carries the server's authoritative totals
+    // and applies them, so a full pull isn't needed at the till.
+    await _syncService.syncPending(branchId: _currentBranch);
     await _loadInventoryItems();
 
     if (mounted) {
@@ -900,9 +916,7 @@ class _HomePageState extends State<HomePage> {
 
   void _fillDrawerWithMatchedItem(Map<String, Object?> matched) {
     _barcodeController.text = matched['barcode']?.toString() ?? '';
-
     _nameController.text = matched['name']?.toString() ?? '';
-
     _priceController.text = ((matched['priceUnit'] as num?)?.toDouble() ?? 0.0)
         .toStringAsFixed(0);
 
@@ -913,7 +927,10 @@ class _HomePageState extends State<HomePage> {
     _trackStock = trackStock == 1;
     _saleEffect = saleEffect;
 
-    _quantityController.text = qty.toString();
+    // Existing item → the box is for the amount being added, so leave it blank.
+    // Current stock is shown as a hint so the user still has the context.
+    _matchedItemCurrentQty = qty;
+    _quantityController.clear();
   }
 
   void _checkInventoryPassword() {
@@ -1029,7 +1046,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _showEditItemDialog(Map<String, Object?> item) async {
     final String barcode = item['barcode']?.toString() ?? '';
-
+    final int baselineQty = (item['quantity'] as num?)?.toInt() ?? 0;
     final TextEditingController nameController = TextEditingController(
       text: item['name']?.toString() ?? '',
     );
@@ -1176,6 +1193,8 @@ class _HomePageState extends State<HomePage> {
                         priceUnit: price,
                         trackStock: trackStock ? 1 : 0,
                         saleEffect: trackStock ? 1 : saleEffect,
+                        baselineQuantity:
+                            baselineQty, // ← the number shown in the field
                         branchId: _currentBranch,
                       );
 
@@ -1327,44 +1346,27 @@ class _HomePageState extends State<HomePage> {
                 );
               }
 
-              // 1. Push and Pull
-              bool pushSuccess = await _syncService.syncPending(
-                branchId: _currentBranch,
-              );
-              bool pullSuccess = await _syncService.pullFromServer(
+              final bool synced = await _syncService.synchronize(
                 branchId: _currentBranch,
               );
 
               if (mounted) {
-                String errorMessage = '';
-                if (!pushSuccess) errorMessage += 'Push failed. ';
-                if (!pullSuccess) errorMessage += 'Pull failed.';
-
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(
-                      pushSuccess && pullSuccess
+                      synced
                           ? "Sync Complete"
-                          : "Sync finished with errors: $errorMessage",
+                          : "Sync incomplete — some changes are still queued",
                     ),
-                    backgroundColor: pushSuccess && pullSuccess
-                        ? Colors.green
-                        : Colors.orange,
+                    backgroundColor: synced ? Colors.green : Colors.orange,
                   ),
                 );
 
-                // 2. FORCE UI REFRESH
+                // The clear-then-reassign dance below is no longer needed: getItems()
+                // returns a fresh deep copy, so setState sees a new object either way.
                 final freshItems = await DBHelper.getItems();
                 setState(() {
-                  _inventoryItems = []; // clear first
-                });
-
-                await Future.delayed(
-                  const Duration(milliseconds: 50),
-                ); // let UI clear
-
-                setState(() {
-                  _inventoryItems = List.from(freshItems); // assign new
+                  _inventoryItems = freshItems;
                 });
               }
             },
@@ -1685,8 +1687,12 @@ class _HomePageState extends State<HomePage> {
                     controller: _quantityController,
                     keyboardType: TextInputType.number,
                     decoration: _customInputDecoration(
-                      label: "Quantity Stock",
+                      label: "Quantity to Add",
                       icon: Icons.layers_rounded,
+                      hint: "How many are arriving",
+                      helper: _matchedItemCurrentQty != null
+                          ? "Currently in stock: $_matchedItemCurrentQty"
+                          : null,
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -2474,14 +2480,8 @@ class _HomePageState extends State<HomePage> {
             Expanded(
               child: RefreshIndicator(
                 onRefresh: () async {
-                  await _syncService.syncPending(branchId: _currentBranch);
-                  await _syncService.pullFromServer(branchId: _currentBranch);
-                  final freshItems = await DBHelper.getItems();
-                  setState(() {
-                    _inventoryItems = List.from(freshItems);
-                  });
+                  await _syncService.synchronize(branchId: _currentBranch);
                   await _loadInventoryItems();
-                  setState(() {}); // Updates the tab instantly
                 },
                 child: _inventoryItems.isEmpty
                     ? ListView(
@@ -2654,12 +2654,12 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-   Future<void> _exportInventoryToCSV() async {
+  Future<void> _exportInventoryToCSV() async {
     try {
       if (_inventoryItems.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No items to export.")),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("No items to export.")));
         return;
       }
 
@@ -2677,16 +2677,20 @@ class _HomePageState extends State<HomePage> {
 
       // 2. Add data rows
       for (final item in _inventoryItems) {
-        final trackStock = (item['trackStock'] as num?)?.toInt() == 1 ? 'Yes' : 'No';
-        final saleEffect = (item['saleEffect'] as num?)?.toInt() == -1 ? 'Deduct' : 'Normal';
-        
+        final trackStock = (item['trackStock'] as num?)?.toInt() == 1
+            ? 'Yes'
+            : 'No';
+        final saleEffect = (item['saleEffect'] as num?)?.toInt() == -1
+            ? 'Deduct'
+            : 'Normal';
+
         final double price = (item['priceUnit'] as num?)?.toDouble() ?? 0.0;
 
         rows.add([
           item['barcode']?.toString() ?? '',
           item['name']?.toString() ?? '',
           (item['quantity'] as num?)?.toInt() ?? 0,
-          price , // Hide price if locked
+          price, // Hide price if locked
           trackStock,
           saleEffect,
         ]);
@@ -2697,7 +2701,8 @@ class _HomePageState extends State<HomePage> {
 
       // 4. Save to temporary file for sharing
       final directory = await getTemporaryDirectory();
-      final String fileName = 'inventory_export_${DateTime.now().millisecondsSinceEpoch}';
+      final String fileName =
+          'inventory_export_${DateTime.now().millisecondsSinceEpoch}';
       final String filePath = '${directory.path}/$fileName.csv';
       final File tempFile = File(filePath);
       await tempFile.writeAsString(csvData);
@@ -2723,11 +2728,14 @@ class _HomePageState extends State<HomePage> {
               style: OutlinedButton.styleFrom(
                 foregroundColor: Colors.blue,
                 side: const BorderSide(color: Colors.blue),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
               ),
               onPressed: () async {
                 Navigator.of(dialogCtx).pop(); // Close dialog first
-                
+
                 final result = await Share.shareXFiles([
                   XFile(filePath),
                 ], text: 'Inventory Export');
@@ -2742,13 +2750,16 @@ class _HomePageState extends State<HomePage> {
               label: const Text("Share File"),
             ),
 
-                     // --- OPTION 2: DOWNLOAD TO PHONE ---
-                     // --- OPTION 2: DOWNLOAD TO PHONE ---
+            // --- OPTION 2: DOWNLOAD TO PHONE ---
+            // --- OPTION 2: DOWNLOAD TO PHONE ---
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.amber.shade600,
                 foregroundColor: Colors.black87,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
               ),
               onPressed: () async {
                 Navigator.of(dialogCtx).pop(); // Close dialog first
@@ -2766,7 +2777,9 @@ class _HomePageState extends State<HomePage> {
                   if (resultPath != null && mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
-                        content: Text("✅ Saved successfully! Check your Files app."),
+                        content: Text(
+                          "✅ Saved successfully! Check your Files app.",
+                        ),
                         backgroundColor: Colors.green,
                       ),
                     );
@@ -2774,7 +2787,10 @@ class _HomePageState extends State<HomePage> {
                 } catch (saveError) {
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text("Save failed: $saveError"), backgroundColor: Colors.red),
+                      SnackBar(
+                        content: Text("Save failed: $saveError"),
+                        backgroundColor: Colors.red,
+                      ),
                     );
                   }
                 }
@@ -2785,7 +2801,6 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       );
-
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2796,5 +2811,14 @@ class _HomePageState extends State<HomePage> {
         );
       }
     }
+  }
+}
+
+class MyHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback =
+          (X509Certificate cert, String host, int port) => true;
   }
 }

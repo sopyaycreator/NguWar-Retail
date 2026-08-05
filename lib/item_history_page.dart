@@ -1,11 +1,25 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 
+/// Displays the stock ledger.
+///
+/// Each row is a movement with a SIGNED delta: negative means stock left the
+/// shelf, positive means it arrived. `qty` holds the same number unsigned, so
+/// older screens keep working — direction lives in `delta`.
 class ItemHistoryPage extends StatefulWidget {
   const ItemHistoryPage({super.key});
 
   @override
   State<ItemHistoryPage> createState() => _ItemHistoryPageState();
+}
+
+/// How a movement should be drawn, derived from its action and direction.
+class _MovementStyle {
+  final IconData icon;
+  final Color color;
+  final String label;
+
+  const _MovementStyle(this.icon, this.color, this.label);
 }
 
 class _ItemHistoryPageState extends State<ItemHistoryPage> {
@@ -30,6 +44,8 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     _loadFirstPage();
 
     _scrollController.addListener(() {
+      if (!_scrollController.hasClients) return;
+
       if (_scrollController.position.pixels >=
           _scrollController.position.maxScrollExtent - 200) {
         _loadMore();
@@ -68,9 +84,9 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
     final List<Map<String, dynamic>> nextPage =
         await DBHelper.getItemHistoryPaginated(
-          limit: _pageSize,
-          offset: _offset,
-        );
+      limit: _pageSize,
+      offset: _offset,
+    );
 
     if (!mounted) return;
 
@@ -87,15 +103,184 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
     for (final log in _historyLogs) {
       final String rawDateStr = log['createdAt']?.toString() ?? '';
-      final String dateKey = rawDateStr.length >= 10
-          ? rawDateStr.substring(0, 10)
-          : "Unknown Date";
+      final String dateKey =
+          rawDateStr.length >= 10 ? rawDateStr.substring(0, 10) : "Unknown Date";
 
       groupedLogs.putIfAbsent(dateKey, () => []);
       groupedLogs[dateKey]!.add(log);
     }
 
     return groupedLogs;
+  }
+
+  /// Resolves a row's signed delta.
+  ///
+  /// Rows written before the migration have delta = 0 and only an action, so
+  /// they are interpreted the same way the server does. 'Edited Item' stays
+  /// at 0 on purpose: its old `qty` was an absolute total, not a change, and
+  /// showing it as ±qty would be a lie.
+  int _resolveDelta(Map<String, dynamic> log) {
+    final int stored = (log['delta'] as num?)?.toInt() ?? 0;
+    if (stored != 0) return stored;
+
+    final int qty = ((log['qty'] as num?)?.toInt() ?? 0).abs();
+    final String action = (log['action']?.toString() ?? '').toLowerCase();
+
+    if (action == 'added item' || action == 'updated item') return qty;
+    if (action == 'deleted item') return -qty;
+    if (action.contains('sale') || action.contains('sold')) return -qty;
+    if (action.contains('return') || action.contains('void')) return qty;
+
+    return 0; // 'Edited Item' and anything unrecognised
+  }
+
+  _MovementStyle _styleFor(String action, int delta) {
+    switch (action.toLowerCase()) {
+      case 'sale':
+        return const _MovementStyle(
+          Icons.point_of_sale_rounded,
+          Colors.red,
+          'Sold',
+        );
+      case 'return':
+        return const _MovementStyle(Icons.undo_rounded, Colors.teal, 'Returned');
+      case 'added item':
+        return const _MovementStyle(
+          Icons.add_box_rounded,
+          Colors.green,
+          'New item',
+        );
+      case 'updated item':
+        return const _MovementStyle(
+          Icons.inventory_rounded,
+          Colors.green,
+          'Stock in',
+        );
+      case 'deleted item':
+        return const _MovementStyle(
+          Icons.delete_rounded,
+          Colors.grey,
+          'Removed',
+        );
+      case 'stock take':
+        return const _MovementStyle(
+          Icons.fact_check_rounded,
+          Colors.deepPurple,
+          'Counted',
+        );
+      case 'edited item':
+        if (delta > 0) {
+          return const _MovementStyle(
+            Icons.edit_note_rounded,
+            Colors.green,
+            'Adjusted up',
+          );
+        }
+        if (delta < 0) {
+          return const _MovementStyle(
+            Icons.edit_note_rounded,
+            Colors.orange,
+            'Adjusted down',
+          );
+        }
+        return const _MovementStyle(
+          Icons.edit_rounded,
+          Colors.blueGrey,
+          'Details edited',
+        );
+      default:
+        if (delta > 0) {
+          return const _MovementStyle(
+            Icons.arrow_downward_rounded,
+            Colors.green,
+            'Stock in',
+          );
+        }
+        if (delta < 0) {
+          return const _MovementStyle(
+            Icons.arrow_upward_rounded,
+            Colors.red,
+            'Stock out',
+          );
+        }
+        return const _MovementStyle(Icons.info_outline, Colors.grey, '');
+    }
+  }
+
+  String _timeOf(String rawCreatedAt) {
+    if (rawCreatedAt.isEmpty) return "00:00";
+
+    try {
+      final DateTime localTime = DateTime.parse(rawCreatedAt).toLocal();
+      final String hour = localTime.hour.toString().padLeft(2, '0');
+      final String minute = localTime.minute.toString().padLeft(2, '0');
+      return "$hour:$minute";
+    } catch (_) {
+      return rawCreatedAt.length >= 16 ? rawCreatedAt.substring(11, 16) : "00:00";
+    }
+  }
+
+  Widget _buildMovementTile(Map<String, dynamic> logRecord) {
+    final String action = logRecord['action']?.toString() ?? 'Unknown';
+    final String itemName = logRecord['itemName']?.toString() ?? 'Unknown Item';
+    final String barcode = logRecord['barcode']?.toString() ?? '-';
+    final String device = logRecord['deviceId']?.toString() ?? '';
+
+    final int delta = _resolveDelta(logRecord);
+    final _MovementStyle style = _styleFor(action, delta);
+    final String timeDisplay = _timeOf(logRecord['createdAt']?.toString() ?? '');
+
+    // Minus sign, not a hyphen — reads clearly at small sizes.
+    final String deltaText = delta > 0
+        ? "+$delta"
+        : delta < 0
+            ? "\u2212${delta.abs()}"
+            : "—";
+
+    return Card(
+      color: Colors.white,
+      elevation: 0.5,
+      margin: const EdgeInsets.only(bottom: 6),
+      child: ListTile(
+        dense: true,
+        leading: CircleAvatar(
+          radius: 18,
+          backgroundColor: style.color.withOpacity(0.12),
+          child: Icon(style.icon, color: style.color, size: 20),
+        ),
+        title: Text(
+          itemName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          "${style.label.isEmpty ? action : style.label} • $timeDisplay\n"
+          "ID: $barcode${device.isEmpty ? '' : ' • $device'}",
+          style: const TextStyle(fontSize: 11),
+        ),
+        isThreeLine: true,
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              deltaText,
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.bold,
+                color: delta == 0 ? Colors.grey : style.color,
+              ),
+            ),
+            if (delta != 0)
+              Text(
+                "pcs",
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -106,8 +291,7 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final Map<String, List<Map<String, dynamic>>> groupedLogs =
-        _groupLogsByDate();
+    final Map<String, List<Map<String, dynamic>>> groupedLogs = _groupLogsByDate();
 
     final List<String> sortedDates = groupedLogs.keys.toList()
       ..sort((a, b) => b.compareTo(a));
@@ -129,161 +313,115 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
             child: _isInitialLoading
                 ? const Center(child: CircularProgressIndicator())
                 : _historyLogs.isEmpty
-                ? ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: const [
-                      SizedBox(height: 100),
-                      Center(
-                        child: Text(
-                          "No item history records discovered yet.",
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ),
-                    ],
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: sortedDates.length + 1,
-                    itemBuilder: (context, dateIndex) {
-                      if (dateIndex == sortedDates.length) {
-                        if (_isLoadingMore) {
-                          return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 16),
-                            child: Center(child: CircularProgressIndicator()),
-                          );
-                        }
-
-                        if (!_hasMore) {
-                          return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 16),
-                            child: Center(
-                              child: Text(
-                                "No more records.",
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            ),
-                          );
-                        }
-
-                        return const SizedBox(height: 16);
-                      }
-
-                      final String dateHeader = sortedDates[dateIndex];
-                      final List<Map<String, dynamic>> dailyLogs =
-                          groupedLogs[dateHeader]!;
-
-                      dailyLogs.sort((a, b) {
-                        final String aDate = a['createdAt']?.toString() ?? '';
-                        final String bDate = b['createdAt']?.toString() ?? '';
-                        return bDate.compareTo(aDate);
-                      });
-
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 8.0,
-                              horizontal: 4.0,
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.amber.shade100,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Text(
-                                "📅 $dateHeader",
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.orange.shade900,
-                                ),
-                              ),
+                    ? ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: const [
+                          SizedBox(height: 100),
+                          Center(
+                            child: Text(
+                              "No item history records discovered yet.",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey),
                             ),
                           ),
-                          ...dailyLogs.map((logRecord) {
-                            final String rawCreatedAt =
-                                logRecord['createdAt']?.toString() ?? '';
-                            String timeDisplay = "00:00";
-
-                            if (rawCreatedAt.isNotEmpty) {
-                              try {
-                                // 1. Parse the string to a DateTime object
-                                // 2. Convert it to the phone's local timezone
-                                DateTime localTime = DateTime.parse(
-                                  rawCreatedAt,
-                                ).toLocal();
-
-                                // 3. Format it manually to HH:mm (or use intl package's DateFormat)
-                                String hour = localTime.hour.toString().padLeft(
-                                  2,
-                                  '0',
-                                );
-                                String minute = localTime.minute
-                                    .toString()
-                                    .padLeft(2, '0');
-                                timeDisplay = "$hour:$minute";
-                              } catch (e) {
-                                // Fallback just in case the string format is invalid
-                                timeDisplay = rawCreatedAt.length >= 16
-                                    ? rawCreatedAt.substring(11, 16)
-                                    : "00:00";
-                              }
+                        ],
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: sortedDates.length + 1,
+                        itemBuilder: (context, dateIndex) {
+                          if (dateIndex == sortedDates.length) {
+                            if (_isLoadingMore) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(child: CircularProgressIndicator()),
+                              );
                             }
 
-                            final String action =
-                                logRecord['action']?.toString() ?? 'Unknown';
-
-                            final String itemName =
-                                logRecord['itemName']?.toString() ??
-                                'Unknown Item';
-
-                            final String barcode =
-                                logRecord['barcode']?.toString() ?? '-';
-
-                            final int qty =
-                                (logRecord['qty'] as num?)?.toInt() ?? 0;
-
-                            return Card(
-                              color: Colors.white,
-                              elevation: 0.5,
-                              margin: const EdgeInsets.only(bottom: 6),
-                              child: ListTile(
-                                dense: true,
-                                leading: Icon(
-                                  action == 'Added Item'
-                                      ? Icons.add_box_rounded
-                                      : Icons.edit_note_rounded,
-                                  color: action == 'Added Item'
-                                      ? Colors.green
-                                      : Colors.blue,
-                                ),
-                                title: Text(
-                                  "$action - $itemName",
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w500,
+                            if (!_hasMore) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(
+                                  child: Text(
+                                    "No more records.",
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
                                   ),
                                 ),
-                                subtitle: Text(
-                                  "Barcode: $barcode\nQty: $qty | Time: $timeDisplay",
-                                  style: const TextStyle(fontSize: 11),
+                              );
+                            }
+
+                            return const SizedBox(height: 16);
+                          }
+
+                          final String dateHeader = sortedDates[dateIndex];
+                          final List<Map<String, dynamic>> dailyLogs =
+                              groupedLogs[dateHeader]!;
+
+                          dailyLogs.sort((a, b) {
+                            final String aDate = a['createdAt']?.toString() ?? '';
+                            final String bDate = b['createdAt']?.toString() ?? '';
+                            return bDate.compareTo(aDate);
+                          });
+
+                          // Net movement for the day — the number that should
+                          // reconcile against a physical count.
+                          final int dayNet = dailyLogs.fold<int>(
+                            0,
+                            (sum, log) => sum + _resolveDelta(log),
+                          );
+
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8.0,
+                                  horizontal: 4.0,
+                                ),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 4,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber.shade100,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        "📅 $dateHeader",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.orange.shade900,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Text(
+                                        "Net: ${dayNet > 0 ? '+' : ''}$dayNet",
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: dayNet < 0
+                                              ? Colors.red.shade800
+                                              : Colors.green.shade800,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
-                            );
-                          }),
-                        ],
-                      );
-                    },
-                  ),
+                              ...dailyLogs.map(_buildMovementTile),
+                            ],
+                          );
+                        },
+                      ),
           ),
         ),
       ),

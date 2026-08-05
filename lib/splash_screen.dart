@@ -24,7 +24,7 @@ class _SplashScreenState extends State<SplashScreen> {
     final packageInfo = await PackageInfo.fromPlatform();
     if (mounted) {
       setState(() {
-        _appVersion = 'Version: ${packageInfo.version}'; // e.g., "v2.1.0"
+        _appVersion = 'Version: ${packageInfo.version}';
       });
     }
     await Future.delayed(const Duration(milliseconds: 800)); // brief splash

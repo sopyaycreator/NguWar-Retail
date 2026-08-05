@@ -40,33 +40,32 @@ class _LoginScreenState extends State<LoginScreen>
     super.dispose();
   }
 
-  Future<void> _login() async {
-    final rawUsername = _loginUsernameCtrl.text.trim();
-    final username = rawUsername.toLowerCase().replaceAll(
-      RegExp(r'[^a-z0-9_]'),
-      '',
-    );
-    final password = _loginPasswordCtrl.text.trim();
+Future<void> _login() async {
+  final rawUsername = _loginUsernameCtrl.text.trim();
+  final username = rawUsername.toLowerCase().replaceAll(
+    RegExp(r'[^a-z0-9_]'),
+    '',
+  );
+  final password = _loginPasswordCtrl.text.trim();
 
-    if (username.isEmpty || password.isEmpty) {
-      _showError('Please enter username and password.');
-      return;
-    }
-
-    setState(() => _isLoading = true);
-    final user = await AuthService.login(username, password);
-    setState(() => _isLoading = false);
-
-    if (user != null && mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const HomePage()),
-        (route) => false,
-      );
-    } else {
-      _showError('Invalid username or password.');
-    }
+  if (username.isEmpty || password.isEmpty) {
+    _showError('Please enter username and password.');
+    return;
   }
 
+  setState(() => _isLoading = true);
+  final result = await AuthService.login(username, password);
+  setState(() => _isLoading = false);
+
+  if (result.isSuccess && mounted) {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const HomePage()),
+      (route) => false,
+    );
+  } else {
+    _showError(result.errorMessage ?? 'Login failed.');
+  }
+}
   Future<void> _signUp() async {
     final username = _signupUsernameCtrl.text.trim();
     final password = _signupPasswordCtrl.text.trim();
