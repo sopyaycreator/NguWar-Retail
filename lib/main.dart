@@ -14,6 +14,7 @@ import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:file_saver/file_saver.dart';
+import 'shop_time.dart';
 
 void main() {
   HttpOverrides.global = MyHttpOverrides();
@@ -116,16 +117,6 @@ class _HomePageState extends State<HomePage> {
         _loadMoreTransactionLogs();
       }
     });
-    // WidgetsBinding.instance.addPostFrameCallback((_) async {
-    //   await _syncService.syncPending(branchId: _currentBranch);
-    //   final pulled = await _syncService.pullFromServer(
-    //     branchId: _currentBranch,
-    //   );
-    //   if (pulled && mounted) {
-    //     await _loadInventoryItems();
-    //     setState(() {});
-    //   }
-    // });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final ok = await _syncService.synchronize(branchId: _currentBranch);
       if (ok && mounted) {
@@ -268,24 +259,19 @@ class _HomePageState extends State<HomePage> {
       );
     }
   }
-
-  Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
-    List<Map<String, dynamic>> logs,
-  ) {
-    final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
-
-    for (final sale in logs) {
-      final String rawDateStr = sale['saleDate']?.toString() ?? '';
-      final String dateKey = rawDateStr.length >= 10
-          ? rawDateStr.substring(0, 10)
-          : "Unknown Date";
-
-      groupedLogs.putIfAbsent(dateKey, () => []);
-      groupedLogs[dateKey]!.add(sale);
-    }
-
-    return groupedLogs;
+Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
+  List<Map<String, dynamic>> logs,
+) {
+  final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
+ 
+  for (final sale in logs) {
+    final String dateKey = ShopTime.dateOf(sale['saleDate']);
+    groupedLogs.putIfAbsent(dateKey, () => []);
+    groupedLogs[dateKey]!.add(sale);
   }
+ 
+  return groupedLogs;
+}
 
   Widget _buildTransactionLogsBottomLoader() {
     if (_isTransactionLogsLoadingMore) {
@@ -831,9 +817,7 @@ class _HomePageState extends State<HomePage> {
                               final String saleDate =
                                   saleRecord['saleDate']?.toString() ?? '';
 
-                              final String timeDisplay = saleDate.length >= 16
-                                  ? saleDate.substring(11, 16)
-                                  : "00:00";
+                             final String timeDisplay = ShopTime.timeOf(saleRecord['saleDate']);
 
                               final String type =
                                   saleRecord['type']?.toString() ?? '';

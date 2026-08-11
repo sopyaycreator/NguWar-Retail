@@ -1,6 +1,23 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 
+import 'shop_time.dart';
+
+/// One occurrence of an item being sold — a single receipt containing it.
+class _SoldOccurrence {
+  final String saleDate;
+  final int qty;
+  final double receiptTotal;
+  final String receiptText;
+
+  const _SoldOccurrence({
+    required this.saleDate,
+    required this.qty,
+    required this.receiptTotal,
+    required this.receiptText,
+  });
+}
+
 class TransactionHistoryPage extends StatefulWidget {
   final bool isUnlocked;
 
@@ -19,6 +36,9 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       TextEditingController();
 
   static const int _datePageSize = 3;
+
+  /// Matches "2x Sunkist Orange" in the receipt's `type` string.
+  static final RegExp _lineItemPattern = RegExp(r'^(\d+)x\s+(.+)$');
 
   final List<Map<String, dynamic>> _dateSummaries = [];
   final Map<String, List<Map<String, dynamic>>> _salesByDate = {};
@@ -56,6 +76,10 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     return double.tryParse(value?.toString() ?? '') ?? 0.0;
   }
 
+  // =========================================================================
+  // DATA
+  // =========================================================================
+
   Future<void> _loadInitialSales() async {
     setState(() {
       _isInitialLoading = true;
@@ -68,18 +92,15 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
     try {
       if (_selectedFilterDateText != null) {
-        final summary = await DBHelper.getSaleDateSummary(
-          _selectedFilterDateText!,
-        );
+        final summary =
+            await DBHelper.getSaleDateSummary(_selectedFilterDateText!);
 
         if (summary == null) {
           if (!mounted) return;
-
           setState(() {
             _hasMoreData = false;
             _isInitialLoading = false;
           });
-
           return;
         }
 
@@ -107,7 +128,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       for (final summary in summaries) {
         final String dateKey = summary['dateKey']?.toString() ?? '';
         if (dateKey.isEmpty) continue;
-
         loadedSales[dateKey] = await DBHelper.getSalesByDate(dateKey);
       }
 
@@ -135,8 +155,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
   Future<void> _loadMoreSales() async {
     if (_isLoadingMore || !_hasMoreData || _isInitialLoading) return;
-
-    // If one date is selected, all transactions for that date are already loaded.
     if (_selectedFilterDateText != null) return;
 
     setState(() {
@@ -154,7 +172,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
       for (final summary in summaries) {
         final String dateKey = summary['dateKey']?.toString() ?? '';
         if (dateKey.isEmpty) continue;
-
         loadedSales[dateKey] = await DBHelper.getSalesByDate(dateKey);
       }
 
@@ -193,8 +210,7 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
     if (picked == null) return;
 
-    final String formatted =
-        "${picked.year.toString().padLeft(4, '0')}-"
+    final String formatted = "${picked.year.toString().padLeft(4, '0')}-"
         "${picked.month.toString().padLeft(2, '0')}-"
         "${picked.day.toString().padLeft(2, '0')}";
 
@@ -222,6 +238,18 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     });
   }
 
+  // =========================================================================
+  // RECEIPT PARSING
+  //
+  // `sales.type` is a display string: "2x Sunkist Orange, 1x Lays".
+  // It's the only per-item record a sale carries, so both the daily totals
+  // and the drill-down below are parsed back out of it.
+  //
+  // LIMITATION: an item name containing a comma will split wrongly. If that
+  // ever becomes a real problem, the fix is a `sale_lines` table rather than
+  // a smarter regex.
+  // =========================================================================
+
   Map<String, int> _buildItemTotalsForSales(
     List<Map<String, dynamic>> dailySales,
   ) {
@@ -229,22 +257,54 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
     for (final sale in dailySales) {
       final String typeText = sale['type']?.toString() ?? '';
-      final List<String> parts = typeText.split(',');
 
-      for (final rawPart in parts) {
-        final String part = rawPart.trim();
+      for (final rawPart in typeText.split(',')) {
+        final match = _lineItemPattern.firstMatch(rawPart.trim());
+        if (match == null) continue;
 
-        final match = RegExp(r'^(\d+)x\s+(.+)$').firstMatch(part);
-        if (match != null) {
-          final int qty = int.tryParse(match.group(1) ?? '0') ?? 0;
-          final String itemName = match.group(2)?.trim() ?? 'Unknown Item';
+        final int qty = int.tryParse(match.group(1) ?? '0') ?? 0;
+        final String itemName = match.group(2)?.trim() ?? 'Unknown Item';
 
-          result[itemName] = (result[itemName] ?? 0) + qty;
-        }
+        result[itemName] = (result[itemName] ?? 0) + qty;
       }
     }
 
     return result;
+  }
+
+  /// Every receipt from [dailySales] that contains [itemName], oldest first.
+  List<_SoldOccurrence> _occurrencesOf(
+    List<Map<String, dynamic>> dailySales,
+    String itemName,
+  ) {
+    final List<_SoldOccurrence> occurrences = [];
+
+    for (final sale in dailySales) {
+      final String typeText = sale['type']?.toString() ?? '';
+      int qtyInThisSale = 0;
+
+      for (final rawPart in typeText.split(',')) {
+        final match = _lineItemPattern.firstMatch(rawPart.trim());
+        if (match == null) continue;
+
+        if ((match.group(2)?.trim() ?? '') == itemName) {
+          qtyInThisSale += int.tryParse(match.group(1) ?? '0') ?? 0;
+        }
+      }
+
+      if (qtyInThisSale > 0) {
+        occurrences.add(_SoldOccurrence(
+          saleDate: sale['saleDate']?.toString() ?? '',
+          qty: qtyInThisSale,
+          receiptTotal: _toDouble(sale['price']),
+          receiptText: typeText,
+        ));
+      }
+    }
+
+    // Chronological — the sheet reads as a timeline through the day.
+    occurrences.sort((a, b) => a.saleDate.compareTo(b.saleDate));
+    return occurrences;
   }
 
   List<MapEntry<String, int>> _filterSoldItemEntries(
@@ -257,48 +317,310 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
 
     if (keyword.isEmpty) return entries;
 
-    return entries.where((entry) {
-      return entry.key.toLowerCase().contains(keyword);
-    }).toList();
+    return entries
+        .where((entry) => entry.key.toLowerCase().contains(keyword))
+        .toList();
   }
 
-  Widget _buildSoldItemSearchBox() {
-    if (!_showDailyItemTotals) return const SizedBox.shrink();
+  // =========================================================================
+  // ITEM DRILL-DOWN SHEET
+  // =========================================================================
 
+  void _showSoldItemDetail({
+    required String itemName,
+    required String dateHeader,
+    required List<Map<String, dynamic>> dailySales,
+  }) {
+    final List<_SoldOccurrence> occurrences =
+        _occurrencesOf(dailySales, itemName);
+
+    final int totalPcs =
+        occurrences.fold<int>(0, (sum, o) => sum + o.qty);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.35,
+          maxChildSize: 0.92,
+          expand: false,
+          builder: (context, scrollController) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFFF6F6F6),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: Column(
+                children: [
+                  // Drag handle
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 10),
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade400,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+
+                  _buildSheetHeader(
+                    itemName: itemName,
+                    dateHeader: dateHeader,
+                    totalPcs: totalPcs,
+                    receiptCount: occurrences.length,
+                  ),
+
+                  const SizedBox(height: 4),
+
+                  Expanded(
+                    child: occurrences.isEmpty
+                        ? const Center(
+                            child: Text(
+                              "No sales found for this item.",
+                              style: TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: scrollController,
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                            itemCount: occurrences.length,
+                            itemBuilder: (context, index) {
+                              return _buildOccurrenceTile(
+                                occurrences[index],
+                                index + 1,
+                                itemName,
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSheetHeader({
+    required String itemName,
+    required String dateHeader,
+    required int totalPcs,
+    required int receiptCount,
+  }) {
     return Padding(
-      padding: const EdgeInsets.only(top: 8),
-      child: TextField(
-        controller: _soldItemSearchController,
-        decoration: InputDecoration(
-          hintText: _selectedFilterDateText == null
-              ? "Search sold item in loaded days"
-              : "Search sold item on $_selectedFilterDateText",
-          prefixIcon: const Icon(Icons.search),
-          suffixIcon: _soldItemSearchText.trim().isEmpty
-              ? null
-              : IconButton(
-                  onPressed: _clearSoldItemSearch,
-                  icon: const Icon(Icons.close),
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade100,
+                  borderRadius: BorderRadius.circular(12),
                 ),
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 10,
+                child: Icon(
+                  Icons.inventory_2_rounded,
+                  color: Colors.amber.shade900,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      itemName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "📅 $dateHeader",
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide.none,
+
+          const SizedBox(height: 14),
+
+          Row(
+            children: [
+              Expanded(
+                child: _buildStatChip(
+                  label: "Total sold",
+                  value: "$totalPcs pcs",
+                  color: Colors.deepOrange,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _buildStatChip(
+                  label: receiptCount == 1 ? "Receipt" : "Receipts",
+                  value: "$receiptCount",
+                  color: Colors.green.shade700,
+                ),
+              ),
+            ],
           ),
-        ),
-        onChanged: (value) {
-          setState(() {
-            _soldItemSearchText = value;
-          });
-        },
+        ],
       ),
     );
   }
+
+  Widget _buildStatChip({
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOccurrenceTile(
+    _SoldOccurrence occurrence,
+    int sequence,
+    String itemName,
+  ) {
+    final String time = ShopTime.timeOf(occurrence.saleDate);
+
+    // The rest of the receipt, so you can see what it sold alongside.
+    final String others = occurrence.receiptText
+        .split(',')
+        .map((p) => p.trim())
+        .where((p) {
+          final match = _lineItemPattern.firstMatch(p);
+          return match != null && (match.group(2)?.trim() ?? '') != itemName;
+        })
+        .join(', ');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Time badge
+          Container(
+            width: 58,
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.amber.shade50,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.amber.shade200),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  time,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.amber.shade900,
+                  ),
+                ),
+                Text(
+                  "#$sequence",
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 12),
+
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      "${occurrence.qty} pcs",
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.deepOrange,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      "${occurrence.receiptTotal.toStringAsFixed(0)} MMK",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.green.shade700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  // The amount above is the WHOLE receipt, not this item's
+                  // share — `sales` stores one total, not per-line prices.
+                  others.isEmpty
+                      ? "Sold on its own"
+                      : "With: $others",
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // LIST VIEWS
+  // =========================================================================
 
   Widget _buildBottomLoader() {
     if (_isLoadingMore) {
@@ -321,6 +643,42 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     }
 
     return const SizedBox.shrink();
+  }
+
+  Widget _buildSoldItemSearchBox() {
+    if (!_showDailyItemTotals) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: TextField(
+        controller: _soldItemSearchController,
+        decoration: InputDecoration(
+          hintText: _selectedFilterDateText == null
+              ? "Search sold item in loaded days"
+              : "Search sold item on $_selectedFilterDateText",
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: _soldItemSearchText.trim().isEmpty
+              ? null
+              : IconButton(
+                  onPressed: _clearSoldItemSearch,
+                  icon: const Icon(Icons.close),
+                ),
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide.none,
+          ),
+        ),
+        onChanged: (value) {
+          setState(() {
+            _soldItemSearchText = value;
+          });
+        },
+      ),
+    );
   }
 
   Widget _buildDateHeader({
@@ -379,13 +737,11 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
         final List<Map<String, dynamic>> dailySales =
             _salesByDate[dateHeader] ?? [];
 
-        final Map<String, int> itemTotals = _buildItemTotalsForSales(
-          dailySales,
-        );
+        final Map<String, int> itemTotals =
+            _buildItemTotalsForSales(dailySales);
 
-        final List<MapEntry<String, int>> entries = _filterSoldItemEntries(
-          itemTotals,
-        );
+        final List<MapEntry<String, int>> entries =
+            _filterSoldItemEntries(itemTotals);
 
         final double dailyAmount = _toDouble(summary['totalAmount']);
 
@@ -416,22 +772,43 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                   color: Colors.white,
                   elevation: 0.5,
                   margin: const EdgeInsets.only(bottom: 6),
+                  clipBehavior: Clip.antiAlias,
                   child: ListTile(
                     dense: true,
-                    leading: const Icon(
-                      Icons.inventory_2,
-                      color: Colors.orange,
+                    onTap: () => _showSoldItemDetail(
+                      itemName: entry.key,
+                      dateHeader: dateHeader,
+                      dailySales: dailySales,
                     ),
+                    leading: const Icon(Icons.inventory_2, color: Colors.orange),
                     title: Text(
                       entry.key,
                       style: const TextStyle(fontWeight: FontWeight.w500),
                     ),
-                    trailing: Text(
-                      "${entry.value} pcs",
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: Colors.deepOrange,
+                    subtitle: Text(
+                      "Tap to see when it sold",
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade500,
                       ),
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          "${entry.value} pcs",
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.deepOrange,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          Icons.chevron_right,
+                          size: 18,
+                          color: Colors.grey.shade400,
+                        ),
+                      ],
                     ),
                   ),
                 );
@@ -471,12 +848,8 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
             ),
 
             ...dailySales.map((saleRecord) {
-              final String rawSaleDate =
-                  saleRecord['saleDate']?.toString() ?? '';
-
-              final String timeDisplay = rawSaleDate.length >= 16
-                  ? rawSaleDate.substring(11, 16)
-                  : "00:00";
+              final String timeDisplay =
+                  ShopTime.timeOf(saleRecord['saleDate']);
 
               final double price = _toDouble(saleRecord['price']);
 
@@ -515,7 +888,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
     if (_selectedFilterDateText != null) {
       return "No transactions found on $_selectedFilterDateText";
     }
-
     return "No transaction history records discovered yet.";
   }
 
@@ -586,7 +958,6 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                     onChanged: (value) {
                       setState(() {
                         _showDailyItemTotals = value;
-
                         if (!value) {
                           _soldItemSearchText = '';
                           _soldItemSearchController.clear();
@@ -620,22 +991,22 @@ class _TransactionHistoryPageState extends State<TransactionHistoryPage> {
                   child: _isInitialLoading
                       ? const Center(child: CircularProgressIndicator())
                       : _dateSummaries.isEmpty
-                      ? ListView(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          children: [
-                            const SizedBox(height: 100),
-                            Center(
-                              child: Text(
-                                _emptyMessage(),
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.grey),
-                              ),
-                            ),
-                          ],
-                        )
-                      : _showDailyItemTotals
-                      ? _buildDailyItemTotalsView()
-                      : _buildFullArchiveView(),
+                          ? ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              children: [
+                                const SizedBox(height: 100),
+                                Center(
+                                  child: Text(
+                                    _emptyMessage(),
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(color: Colors.grey),
+                                  ),
+                                ),
+                              ],
+                            )
+                          : _showDailyItemTotals
+                              ? _buildDailyItemTotalsView()
+                              : _buildFullArchiveView(),
                 ),
               ),
             ],

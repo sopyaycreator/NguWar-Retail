@@ -4,6 +4,8 @@ import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+import 'shop_time.dart';
+
 /// ---------------------------------------------------------------------------
 /// THE ONE RULE THIS FILE ENFORCES
 ///
@@ -149,13 +151,17 @@ class DBHelper {
 
         if (oldVersion < 6) {
           try {
-            await db.execute('ALTER TABLE sales ADD COLUMN serverId INTEGER UNIQUE');
+            await db.execute(
+              'ALTER TABLE sales ADD COLUMN serverId INTEGER UNIQUE',
+            );
           } catch (_) {}
         }
 
         if (oldVersion < 7) {
           try {
-            await db.execute('ALTER TABLE item_history ADD COLUMN serverId INTEGER UNIQUE');
+            await db.execute(
+              'ALTER TABLE item_history ADD COLUMN serverId INTEGER UNIQUE',
+            );
           } catch (_) {}
         }
 
@@ -165,7 +171,9 @@ class DBHelper {
 
         if (oldVersion < 9) {
           try {
-            await db.execute('ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0');
+            await db.execute(
+              'ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0',
+            );
           } catch (_) {}
         }
 
@@ -243,13 +251,19 @@ class DBHelper {
     final names = columns.map((c) => c['name']).toSet();
 
     if (!names.contains('trackStock')) {
-      await db.execute('ALTER TABLE items ADD COLUMN trackStock INTEGER DEFAULT 1');
+      await db.execute(
+        'ALTER TABLE items ADD COLUMN trackStock INTEGER DEFAULT 1',
+      );
     }
     if (!names.contains('saleEffect')) {
-      await db.execute('ALTER TABLE items ADD COLUMN saleEffect INTEGER DEFAULT 1');
+      await db.execute(
+        'ALTER TABLE items ADD COLUMN saleEffect INTEGER DEFAULT 1',
+      );
     }
     if (!names.contains('isDeleted')) {
-      await db.execute('ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0');
+      await db.execute(
+        'ALTER TABLE items ADD COLUMN isDeleted INTEGER DEFAULT 0',
+      );
     }
   }
 
@@ -280,11 +294,10 @@ class DBHelper {
     }
 
     final generated = 'dev-${_uuid.v4()}';
-    await db.insert(
-      'app_meta',
-      {'key': 'deviceId', 'value': generated},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await db.insert('app_meta', {
+      'key': 'deviceId',
+      'value': generated,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
     _cachedDeviceId = generated;
     return generated;
   }
@@ -371,10 +384,13 @@ class DBHelper {
       limit: 1,
     );
 
-    final attempts = (rows.isNotEmpty ? rows.first['attempts'] as num? : null)?.toInt() ?? 0;
+    final attempts =
+        (rows.isNotEmpty ? rows.first['attempts'] as num? : null)?.toInt() ?? 0;
 
     if (attempts >= maxSyncAttempts) {
-      await db.rawUpdate('UPDATE sync_queue SET synced = -1 WHERE id = ?', [id]);
+      await db.rawUpdate('UPDATE sync_queue SET synced = -1 WHERE id = ?', [
+        id,
+      ]);
       // ignore: avoid_print
       print('Sync row $id parked after $attempts attempts: $errorMsg');
     }
@@ -516,8 +532,8 @@ class DBHelper {
     await db.transaction((txn) async {
       final String clientId =
           sale['clientId']?.toString().trim().isNotEmpty == true
-              ? sale['clientId'].toString()
-              : _newClientId('sale');
+          ? sale['clientId'].toString()
+          : _newClientId('sale');
 
       final salePayload = {
         'clientId': clientId,
@@ -771,7 +787,8 @@ class DBHelper {
       );
 
       if (existing.isNotEmpty) {
-        final int currentQty = (existing.first['quantity'] as num?)?.toInt() ?? 0;
+        final int currentQty =
+            (existing.first['quantity'] as num?)?.toInt() ?? 0;
 
         // Take the stock out through the ledger first, so the books balance.
         if (currentQty != 0) {
@@ -923,14 +940,16 @@ class DBHelper {
     String? saleDate,
   }) async {
     final db = await database;
+
     final rows = await db.query(
       'sales',
-      where: saleDate == null ? null : "substr(saleDate, 1, 10) = ?",
+      where: saleDate == null ? null : "${ShopTime.sqlLocalDate} = ?",
       whereArgs: saleDate == null ? null : [saleDate],
       orderBy: 'saleDate DESC',
       limit: limit,
       offset: offset,
     );
+
     return rows.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
@@ -939,51 +958,60 @@ class DBHelper {
     required int offset,
   }) async {
     final db = await database;
+
     final rows = await db.rawQuery(
       '''
-      SELECT
-        substr(saleDate, 1, 10) AS dateKey,
-        COUNT(*) AS transactionCount,
-        COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
-      FROM sales
-      WHERE saleDate IS NOT NULL AND length(saleDate) >= 10
-      GROUP BY substr(saleDate, 1, 10)
-      ORDER BY dateKey DESC
-      LIMIT ? OFFSET ?
-      ''',
+    SELECT
+      ${ShopTime.sqlLocalDate} AS dateKey,
+      COUNT(*) AS transactionCount,
+      COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
+    FROM sales
+    WHERE saleDate IS NOT NULL AND length(saleDate) >= 10
+    GROUP BY dateKey
+    ORDER BY dateKey DESC
+    LIMIT ? OFFSET ?
+    ''',
       [limit, offset],
     );
+
     return rows.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
-  static Future<Map<String, dynamic>?> getSaleDateSummary(String saleDate) async {
+  static Future<Map<String, dynamic>?> getSaleDateSummary(
+    String saleDate,
+  ) async {
     final db = await database;
+
     final rows = await db.rawQuery(
       '''
-      SELECT
-        substr(saleDate, 1, 10) AS dateKey,
-        COUNT(*) AS transactionCount,
-        COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
-      FROM sales
-      WHERE substr(saleDate, 1, 10) = ?
-      GROUP BY substr(saleDate, 1, 10)
-      ''',
+    SELECT
+      ${ShopTime.sqlLocalDate} AS dateKey,
+      COUNT(*) AS transactionCount,
+      COALESCE(SUM(COALESCE(price, 0)), 0) AS totalAmount
+    FROM sales
+    WHERE ${ShopTime.sqlLocalDate} = ?
+    GROUP BY dateKey
+    ''',
       [saleDate],
     );
+
     if (rows.isEmpty) return null;
     return Map<String, dynamic>.from(rows.first);
   }
-
-  static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async {
-    final db = await database;
-    final rows = await db.query(
-      'sales',
-      where: 'substr(saleDate, 1, 10) = ?',
-      whereArgs: [saleDate],
-      orderBy: 'saleDate DESC',
-    );
-    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
-  }
+ 
+static Future<List<Map<String, dynamic>>> getSalesByDate(String saleDate) async {
+  final db = await database;
+ 
+  final rows = await db.query(
+    'sales',
+    where: "${ShopTime.sqlLocalDate} = ?",
+    whereArgs: [saleDate],
+    orderBy: 'saleDate DESC',
+  );
+ 
+  return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+}
+ 
 
   static Future<List<Map<String, Object?>>> getSales() async {
     final db = await database;
@@ -1011,7 +1039,8 @@ class DBHelper {
     final String barcode = item['barcode']?.toString().trim() ?? '';
     if (barcode.isEmpty) return;
 
-    final int serverQty = (item['quantity'] as num?)?.toInt() ??
+    final int serverQty =
+        (item['quantity'] as num?)?.toInt() ??
         int.tryParse(item['quantity']?.toString() ?? '0') ??
         0;
 
@@ -1039,7 +1068,12 @@ class DBHelper {
     );
 
     if (existing.isNotEmpty) {
-      await db.update('items', data, where: 'barcode = ?', whereArgs: [barcode]);
+      await db.update(
+        'items',
+        data,
+        where: 'barcode = ?',
+        whereArgs: [barcode],
+      );
     } else {
       await db.insert('items', data);
     }
@@ -1055,14 +1089,17 @@ class DBHelper {
   static Future<void> upsertHistoryFromServer(Map<String, dynamic> h) async {
     final db = await database;
 
-    final int? serverId = int.tryParse((h['id'] ?? h['serverId'] ?? '').toString());
+    final int? serverId = int.tryParse(
+      (h['id'] ?? h['serverId'] ?? '').toString(),
+    );
     final String clientId = h['clientId']?.toString().trim() ?? '';
 
     final String itemName = h['itemName']?.toString() ?? '';
     final String barcode = h['barcode']?.toString() ?? '';
     final String action = h['action']?.toString() ?? '';
     final int qty = (h['qty'] as num?)?.toInt() ?? 0;
-    final int delta = (h['delta'] as num?)?.toInt() ??
+    final int delta =
+        (h['delta'] as num?)?.toInt() ??
         int.tryParse(h['delta']?.toString() ?? '') ??
         0;
     final String createdAt = h['createdAt']?.toString() ?? '';
@@ -1126,7 +1163,9 @@ class DBHelper {
   static Future<void> upsertSaleFromServer(Map<String, dynamic> sale) async {
     final db = await database;
 
-    final int? serverId = int.tryParse((sale['id'] ?? sale['serverId'] ?? '').toString());
+    final int? serverId = int.tryParse(
+      (sale['id'] ?? sale['serverId'] ?? '').toString(),
+    );
     final String clientId = sale['clientId']?.toString().trim() ?? '';
 
     final data = {
@@ -1145,7 +1184,12 @@ class DBHelper {
         limit: 1,
       );
       if (existing.isNotEmpty) {
-        await db.update('sales', data, where: 'id = ?', whereArgs: [existing.first['id']]);
+        await db.update(
+          'sales',
+          data,
+          where: 'id = ?',
+          whereArgs: [existing.first['id']],
+        );
         return;
       }
     }

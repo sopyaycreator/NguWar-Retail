@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:nguwar/shop_time.dart';
 import 'db_helper.dart';
 
 /// Displays the stock ledger.
@@ -103,8 +104,8 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
     for (final log in _historyLogs) {
       final String rawDateStr = log['createdAt']?.toString() ?? '';
-      final String dateKey =
-          rawDateStr.length >= 10 ? rawDateStr.substring(0, 10) : "Unknown Date";
+
+final String dateKey = ShopTime.dateOf(log['createdAt']);
 
       groupedLogs.putIfAbsent(dateKey, () => []);
       groupedLogs[dateKey]!.add(log);
@@ -207,18 +208,7 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     }
   }
 
-  String _timeOf(String rawCreatedAt) {
-    if (rawCreatedAt.isEmpty) return "00:00";
-
-    try {
-      final DateTime localTime = DateTime.parse(rawCreatedAt).toLocal();
-      final String hour = localTime.hour.toString().padLeft(2, '0');
-      final String minute = localTime.minute.toString().padLeft(2, '0');
-      return "$hour:$minute";
-    } catch (_) {
-      return rawCreatedAt.length >= 16 ? rawCreatedAt.substring(11, 16) : "00:00";
-    }
-  }
+String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
 
   Widget _buildMovementTile(Map<String, dynamic> logRecord) {
     final String action = logRecord['action']?.toString() ?? 'Unknown';
