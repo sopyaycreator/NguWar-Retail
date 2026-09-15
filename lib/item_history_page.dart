@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:nguwar/shop_time.dart';
 import 'db_helper.dart';
 
+
 /// Displays the stock ledger.
 ///
 /// Each row is a movement with a SIGNED delta: negative means stock left the
@@ -10,9 +11,11 @@ import 'db_helper.dart';
 class ItemHistoryPage extends StatefulWidget {
   const ItemHistoryPage({super.key});
 
+
   @override
   State<ItemHistoryPage> createState() => _ItemHistoryPageState();
 }
+
 
 /// How a movement should be drawn, derived from its action and direction.
 class _MovementStyle {
@@ -20,32 +23,42 @@ class _MovementStyle {
   final Color color;
   final String label;
 
+
   const _MovementStyle(this.icon, this.color, this.label);
 }
+
 
 class _ItemHistoryPageState extends State<ItemHistoryPage> {
   final GlobalKey<RefreshIndicatorState> _refreshKey =
       GlobalKey<RefreshIndicatorState>();
 
+
   final ScrollController _scrollController = ScrollController();
+
 
   final List<Map<String, dynamic>> _historyLogs = [];
 
+
   static const int _pageSize = 20;
+
 
   int _offset = 0;
   bool _isInitialLoading = true;
   bool _isLoadingMore = false;
   bool _hasMore = true;
 
+
   @override
   void initState() {
     super.initState();
 
+
     _loadFirstPage();
+
 
     _scrollController.addListener(() {
       if (!_scrollController.hasClients) return;
+
 
       if (_scrollController.position.pixels >=
           _scrollController.position.maxScrollExtent - 200) {
@@ -53,6 +66,7 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
       }
     });
   }
+
 
   Future<void> _loadFirstPage() async {
     setState(() {
@@ -63,10 +77,13 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
       _historyLogs.clear();
     });
 
+
     final List<Map<String, dynamic>> firstPage =
         await DBHelper.getItemHistoryPaginated(limit: _pageSize, offset: 0);
 
+
     if (!mounted) return;
+
 
     setState(() {
       _historyLogs.addAll(firstPage);
@@ -76,12 +93,15 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     });
   }
 
+
   Future<void> _loadMore() async {
     if (_isInitialLoading || _isLoadingMore || !_hasMore) return;
+
 
     setState(() {
       _isLoadingMore = true;
     });
+
 
     final List<Map<String, dynamic>> nextPage =
         await DBHelper.getItemHistoryPaginated(
@@ -89,7 +109,9 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
       offset: _offset,
     );
 
+
     if (!mounted) return;
+
 
     setState(() {
       _historyLogs.addAll(nextPage);
@@ -99,16 +121,17 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     });
   }
 
- Map<String, List<Map<String, dynamic>>> _groupLogsByDate() {
+Map<String, List<Map<String, dynamic>>> _groupLogsByDate() {
   final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
 
   for (final log in _historyLogs) {
-    final String action = (log['action']?.toString() ?? '').toLowerCase();
+    final String action =
+        (log['action']?.toString() ?? '').trim().toLowerCase();
 
-    // UI only: do not show sold / sale records in Item History.
-    if (action == 'sale' ||
-        action.contains('sale') ||
-        action.contains('sold')) {
+    // UI only: hide Sold/Sale records.
+    // All other records—including Added Item, Edited Item,
+    // Updated Item, Return, Deleted Item, Stock Take—remain visible.
+    if (action == 'sale' || action == 'sold') {
       continue;
     }
 
@@ -120,7 +143,6 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
   return groupedLogs;
 }
-
   /// Resolves a row's signed delta.
   ///
   /// Rows written before the migration have delta = 0 and only an action, so
@@ -131,16 +153,20 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     final int stored = (log['delta'] as num?)?.toInt() ?? 0;
     if (stored != 0) return stored;
 
+
     final int qty = ((log['qty'] as num?)?.toInt() ?? 0).abs();
     final String action = (log['action']?.toString() ?? '').toLowerCase();
+
 
     if (action == 'added item' || action == 'updated item') return qty;
     if (action == 'deleted item') return -qty;
     if (action.contains('sale') || action.contains('sold')) return -qty;
     if (action.contains('return') || action.contains('void')) return qty;
 
+
     return 0; // 'Edited Item' and anything unrecognised
   }
+
 
   _MovementStyle _styleFor(String action, int delta) {
     switch (action.toLowerCase()) {
@@ -215,7 +241,9 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     }
   }
 
+
 String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
+
 
   Widget _buildMovementTile(Map<String, dynamic> logRecord) {
     final String action = logRecord['action']?.toString() ?? 'Unknown';
@@ -223,9 +251,11 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
     final String barcode = logRecord['barcode']?.toString() ?? '-';
     final String device = logRecord['deviceId']?.toString() ?? '';
 
+
     final int delta = _resolveDelta(logRecord);
     final _MovementStyle style = _styleFor(action, delta);
     final String timeDisplay = _timeOf(logRecord['createdAt']?.toString() ?? '');
+
 
     // Minus sign, not a hyphen — reads clearly at small sizes.
     final String deltaText = delta > 0
@@ -233,6 +263,7 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
         : delta < 0
             ? "\u2212${delta.abs()}"
             : "—";
+
 
     return Card(
       color: Colors.white,
@@ -280,18 +311,22 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
     );
   }
 
+
   @override
   void dispose() {
     _scrollController.dispose();
     super.dispose();
   }
 
+
   @override
   Widget build(BuildContext context) {
     final Map<String, List<Map<String, dynamic>>> groupedLogs = _groupLogsByDate();
 
+
     final List<String> sortedDates = groupedLogs.keys.toList()
       ..sort((a, b) => b.compareTo(a));
+
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F6F6),
@@ -336,6 +371,7 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
                               );
                             }
 
+
                             if (!_hasMore) {
                               return const Padding(
                                 padding: EdgeInsets.symmetric(vertical: 16),
@@ -351,12 +387,15 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
                               );
                             }
 
+
                             return const SizedBox(height: 16);
                           }
+
 
                           final String dateHeader = sortedDates[dateIndex];
                           final List<Map<String, dynamic>> dailyLogs =
                               groupedLogs[dateHeader]!;
+
 
                           dailyLogs.sort((a, b) {
                             final String aDate = a['createdAt']?.toString() ?? '';
@@ -364,12 +403,14 @@ String _timeOf(String rawCreatedAt) => ShopTime.timeOf(rawCreatedAt);
                             return bDate.compareTo(aDate);
                           });
 
+
                           // Net movement for the day — the number that should
                           // reconcile against a physical count.
                           final int dayNet = dailyLogs.fold<int>(
                             0,
                             (sum, log) => sum + _resolveDelta(log),
                           );
+
 
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
