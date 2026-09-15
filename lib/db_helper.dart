@@ -27,10 +27,10 @@ class DBHelper {
 
   static const int _dbVersion = 10;
   static const String defaultBranchId = 'nguwar_1';
-
-  /// A queue row is parked after this many failed attempts, so one bad
-  /// payload can't block everything behind it forever.
-  static const int maxSyncAttempts = 5;
+/// Only *permanent* failures count toward this. Timeouts, offline, and
+  /// "server busy" (HTTP 503) no longer burn an attempt, so a slow
+  /// afternoon can never discard a day of sales again.
+  static const int maxSyncAttempts = 25;
 
   static final Uuid _uuid = Uuid();
 
@@ -362,12 +362,21 @@ class DBHelper {
       ids,
     );
   }
-
-  /// Records a failure and parks the row once it has failed too often.
+/// A TEMPORARY problem — timeout, offline, HTTP 503 "Database busy".
   ///
-  /// The old version only printed. Because the row stayed pending, the sync
-  /// loop re-fetched the same batch and retried forever — an infinite loop
-  /// that hammered the server. Parking (synced = -1) lets the queue drain.
+  /// Records what happened for diagnostics but does NOT count an attempt,
+  /// so the row can never be parked because the server was slow. This is
+  /// the single most important change in this fix.
+  static Future<void> markQueueRetryable(int id, String errorMsg) async {
+    final db = await database;
+    await db.rawUpdate(
+      'UPDATE sync_queue SET lastError = ? WHERE id = ?',
+      ['[retryable] $errorMsg', id],
+    );
+  }
+
+  /// A PERMANENT problem — the server rejected this specific payload.
+  /// Counts an attempt and parks the row once it has failed too often.
   static Future<void> markQueueError(int id, String errorMsg) async {
     final db = await database;
 
@@ -412,6 +421,32 @@ class DBHelper {
       [branchId],
     );
     return (result.first['count'] as int?) ?? 0;
+  }
+  /// Parked rows with their error text — for the diagnostics screen.
+  static Future<List<Map<String, dynamic>>> getFailedSyncRows(
+    String branchId,
+  ) async {
+    final db = await database;
+    final rows = await db.query(
+      'sync_queue',
+      where: 'branchId = ? AND synced = -1',
+      whereArgs: [branchId],
+      orderBy: 'createdAt DESC',
+      limit: 100,
+    );
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  /// Oldest unsent row, so you can tell "queued 2 minutes ago" from
+  /// "queued last Tuesday".
+  static Future<String?> getOldestUnsentAt(String branchId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT MIN(createdAt) AS oldest FROM sync_queue '
+      'WHERE branchId = ? AND synced IN (0, -1)',
+      [branchId],
+    );
+    return rows.first['oldest']?.toString();
   }
 
   static Future<void> clearSyncedQueue() async {

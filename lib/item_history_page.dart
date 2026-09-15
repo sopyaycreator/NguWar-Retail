@@ -99,20 +99,27 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     });
   }
 
-  Map<String, List<Map<String, dynamic>>> _groupLogsByDate() {
-    final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
+ Map<String, List<Map<String, dynamic>>> _groupLogsByDate() {
+  final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
 
-    for (final log in _historyLogs) {
-      final String rawDateStr = log['createdAt']?.toString() ?? '';
+  for (final log in _historyLogs) {
+    final String action = (log['action']?.toString() ?? '').toLowerCase();
 
-final String dateKey = ShopTime.dateOf(log['createdAt']);
-
-      groupedLogs.putIfAbsent(dateKey, () => []);
-      groupedLogs[dateKey]!.add(log);
+    // UI only: do not show sold / sale records in Item History.
+    if (action == 'sale' ||
+        action.contains('sale') ||
+        action.contains('sold')) {
+      continue;
     }
 
-    return groupedLogs;
+    final String dateKey = ShopTime.dateOf(log['createdAt']);
+
+    groupedLogs.putIfAbsent(dateKey, () => []);
+    groupedLogs[dateKey]!.add(log);
   }
+
+  return groupedLogs;
+}
 
   /// Resolves a row's signed delta.
   ///

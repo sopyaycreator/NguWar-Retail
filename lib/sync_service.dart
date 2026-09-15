@@ -8,14 +8,59 @@ import 'package:http/http.dart' as http;
 
 import 'db_helper.dart';
 
+/// The outcome of a sync cycle.
+///
+/// The old code returned a bare `bool`, which could not distinguish
+/// "everything arrived" from "the queue is empty because I gave up on a
+/// day's worth of sales". That is why the UI showed a green tick while
+/// 14 August sat dead on the device.
+class SyncResult {
+  /// Queue fully drained AND the pull succeeded.
+  final bool ok;
+
+  /// Rows still waiting. They will be retried automatically.
+  final int stillPending;
+
+  /// Rows given up on. These need attention — they are NOT retried
+  /// automatically except once per app launch.
+  final int parked;
+
+  final String? note;
+
+  const SyncResult({
+    required this.ok,
+    this.stillPending = 0,
+    this.parked = 0,
+    this.note,
+  });
+  
+
+  bool get hasUnsentData => stillPending > 0 || parked > 0;
+
+  /// One line, safe to drop straight into a SnackBar.
+  String get summary {
+    if (ok && !hasUnsentData) return 'Sync complete';
+    if (parked > 0 && stillPending > 0) {
+      return 'Sync incomplete — $stillPending queued, $parked failed';
+    }
+    if (parked > 0) return 'Sync incomplete — $parked items failed to send';
+    if (stillPending > 0) return 'Sync incomplete — $stillPending items queued';
+    return note ?? 'Sync incomplete';
+  }
+}
+
 class SyncService {
   static const String baseUrl = 'https://z312050-6w40u2.ps11.zwhhosting.com';
   static const String apiKey = 'nguwar-pos-my-secret-2026';
 
-  /// Tells the server this device speaks the delta protocol. The server
-  /// falls back to the old absolute behaviour for anything without it, so a
-  /// half-updated fleet keeps working during rollout.
+  /// Tells the server this device speaks the delta protocol.
   static const int syncVersion = 2;
+
+  /// Parked rows get one free retry per app launch. Safe: every movement
+  /// carries a clientId and the server does INSERT IGNORE, so a re-send
+  /// that already landed is skipped rather than applied twice.
+  static bool _recoveredThisLaunch = false;
+  bool _isPulling = false;
 
   StreamSubscription<List<ConnectivityResult>>? _subscription;
   Timer? _connectivityDebounce;
@@ -39,29 +84,58 @@ class SyncService {
     await _subscription?.cancel();
   }
 
-  /// PUSH first, THEN pull. This order is mandatory.
+  // =========================================================================
+  // FAILURE CLASSIFICATION — the core of the fix
+  // =========================================================================
+
+  /// Is this HTTP status a temporary condition worth waiting out?
   ///
-  /// Pulling first would overwrite local stock with the server's totals,
-  /// which don't yet include this device's pending sales — the numbers would
-  /// look wrong until the next push.
-  Future<bool> synchronize({required String branchId}) async {
-    final pushed = await syncPending(branchId: branchId);
-    if (!pushed) return false;
-    return await pullFromServer(branchId: branchId);
+  /// Your server returns 503 "Database busy, retry." straight from
+  /// getConnection() when the pool (connectionLimit: 3) is exhausted. That
+  /// is explicitly a *retry me later* signal. The old client counted it
+  /// against the 5-attempt limit exactly like a malformed payload, so a
+  /// busy afternoon was enough to permanently discard a day of sales.
+  ///
+  /// Retryable failures no longer burn an attempt, and they stop the cycle
+  /// instead of hammering a server that has just said it is overloaded.
+  static bool _isRetryableStatus(int statusCode) {
+    return statusCode == 408 || // request timeout
+        statusCode == 425 || // too early
+        statusCode == 429 || // rate limited
+        statusCode == 502 || // bad gateway
+        statusCode == 503 || // YOUR "Database busy, retry."
+        statusCode == 504; // gateway timeout
+  }
+
+  /// PUSH first, THEN pull. This order is mandatory.
+  Future<SyncResult> synchronize({required String branchId}) async {
+    final pushResult = await syncPending(branchId: branchId);
+    if (!pushResult.ok) return pushResult;
+
+    final pulled = await pullFromServer(branchId: branchId);
+
+    return SyncResult(
+      ok: pulled,
+      stillPending: pushResult.stillPending,
+      parked: pushResult.parked,
+      note: pulled ? null : 'Could not read latest data from server',
+    );
   }
 
   // =========================================================================
   // PUSH
   // =========================================================================
 
-  Future<bool> syncPending({required String branchId}) async {
+  Future<SyncResult> syncPending({required String branchId}) async {
     if (_isSyncing) {
       int retries = 0;
       while (_isSyncing && retries < 15) {
         await Future.delayed(const Duration(seconds: 1));
         retries++;
       }
-      if (_isSyncing) return false;
+      if (_isSyncing) {
+        return const SyncResult(ok: false, note: 'Another sync is running');
+      }
     }
 
     _isSyncing = true;
@@ -69,20 +143,37 @@ class SyncService {
     try {
       final deviceId = await DBHelper.getDeviceId();
 
-      // Hard stop. The old code had `while (true)` with no exit when a batch
-      // kept failing: markQueueError only printed, the row stayed pending,
-      // the same batch was re-fetched, forever. This bounds it.
+      // Give previously-parked rows one more chance, once per launch.
+      if (!_recoveredThisLaunch) {
+        _recoveredThisLaunch = true;
+        final revived = await DBHelper.getParkedSyncCount(branchId);
+        if (revived > 0) {
+          debugPrint('SYNC: un-parking $revived failed rows for one retry');
+          await DBHelper.recoverFailedTransactions();
+        }
+      }
+
       int loopGuard = 0;
       const int maxLoops = 200;
 
       while (true) {
         if (++loopGuard > maxLoops) {
           debugPrint('SYNC: loop guard hit — stopping, will resume next cycle');
-          return false;
+          return SyncResult(
+            ok: false,
+            stillPending: await DBHelper.getPendingSyncCount(branchId),
+            parked: await DBHelper.getParkedSyncCount(branchId),
+            note: 'Too many batches in one cycle',
+          );
         }
 
         final allPending = await DBHelper.getPendingSyncQueue(branchId);
-        if (allPending.isEmpty) return true;
+        if (allPending.isEmpty) {
+          final parked = await DBHelper.getParkedSyncCount(branchId);
+          // The queue being empty is NOT the same as success. If rows were
+          // parked, say so — do not report a clean sync.
+          return SyncResult(ok: true, parked: parked);
+        }
 
         final int batchSize =
             allPending.length > 100 ? 5 : (allPending.length > 50 ? 10 : 15);
@@ -107,6 +198,8 @@ class SyncService {
                 as Map<String, dynamic>;
           } catch (e) {
             debugPrint('Invalid JSON payload for ID $id: $e');
+            // A payload that will not parse is permanently broken. Counting
+            // it is correct.
             await DBHelper.markQueueError(id, 'Invalid JSON payload');
             continue;
           }
@@ -135,11 +228,7 @@ class SyncService {
           }
         }
 
-        if (ids.isEmpty) {
-          // Every row in this batch was unparseable and has been counted
-          // against its attempt limit. Loop again; they will park out.
-          continue;
-        }
+        if (ids.isEmpty) continue;
 
         final uri = Uri.parse('$baseUrl/api/$branchId/sync');
 
@@ -166,14 +255,25 @@ class SyncService {
               .timeout(const Duration(seconds: 120));
         } on TimeoutException catch (e) {
           // A timeout often means the server DID commit — our 120s cutoff is
-          // shorter than its 180s. Re-sending is safe: every movement carries
-          // a clientId, so the server skips ones it already applied.
+          // shorter than its 180s. Re-sending is safe because of clientId.
+          // But a timeout is NEVER the device's fault, so it must not count
+          // toward parking.
           debugPrint('SYNC batch timeout: $e');
-          await _syncIndividually(pending, branchId, deviceId);
-          continue;
+          await _markAllRetryable(ids, 'Batch timeout — server slow');
+          return SyncResult(
+            ok: false,
+            stillPending: await DBHelper.getPendingSyncCount(branchId),
+            parked: await DBHelper.getParkedSyncCount(branchId),
+            note: 'Server too slow — will retry',
+          );
         } on SocketException catch (e) {
           debugPrint('Sync network error (offline): $e');
-          return false;
+          return SyncResult(
+            ok: false,
+            stillPending: await DBHelper.getPendingSyncCount(branchId),
+            parked: await DBHelper.getParkedSyncCount(branchId),
+            note: 'Offline',
+          );
         } catch (e) {
           debugPrint('SYNC batch error: $e');
           await _syncIndividually(pending, branchId, deviceId);
@@ -182,22 +282,37 @@ class SyncService {
 
         debugPrint('SYNC response: ${response.statusCode}');
 
+        // ---- Temporary server trouble: back off, do not punish rows ----
+        if (_isRetryableStatus(response.statusCode)) {
+          debugPrint(
+            'SYNC: server busy (HTTP ${response.statusCode}) — backing off',
+          );
+          await _markAllRetryable(
+            ids,
+            'Server busy (HTTP ${response.statusCode})',
+          );
+          return SyncResult(
+            ok: false,
+            stillPending: await DBHelper.getPendingSyncCount(branchId),
+            parked: await DBHelper.getParkedSyncCount(branchId),
+            note: 'Server busy — will retry automatically',
+          );
+        }
+
         if (response.statusCode >= 200 && response.statusCode < 300) {
           try {
             final body = jsonDecode(response.body);
             if (body['success'] == true) {
               await DBHelper.markQueueSynced(ids);
 
-              if (body['deltasUnapplied'] != null &&
-                  (body['deltasUnapplied'] as num) > 0) {
+              final unapplied = body['deltasUnapplied'];
+              if (unapplied != null && (unapplied as num) > 0) {
                 debugPrint(
-                  'SYNC WARNING: ${body['deltasUnapplied']} movements did not '
-                  'apply on the server — check its logs',
+                  'SYNC WARNING: $unapplied movements did not apply on the '
+                  'server — an item row was missing or untracked',
                 );
               }
 
-              // Adopt the server's totals for this batch. It has seen every
-              // device; we have not.
               if (body['items'] is List) {
                 await DBHelper.applyServerItems(body['items'] as List);
               }
@@ -220,18 +335,21 @@ class SyncService {
       }
     } on TimeoutException catch (e) {
       debugPrint('Sync timeout: $e');
-      return false;
+      return const SyncResult(ok: false, note: 'Timed out');
     } on SocketException catch (e) {
       debugPrint('Sync network error (offline): $e');
-      return false;
+      return const SyncResult(ok: false, note: 'Offline');
     } catch (e) {
       debugPrint('SyncService critical error: $e');
-      return false;
+      return SyncResult(ok: false, note: 'Sync error: $e');
     } finally {
-      // Always released, on every path. The old code set this in each catch
-      // block individually and could leak a stuck `true` on an unexpected
-      // return, blocking every later sync.
       _isSyncing = false;
+    }
+  }
+
+  Future<void> _markAllRetryable(List<int> ids, String reason) async {
+    for (final id in ids) {
+      await DBHelper.markQueueRetryable(id, reason);
     }
   }
 
@@ -303,6 +421,18 @@ class SyncService {
             )
             .timeout(const Duration(seconds: 60));
 
+        if (_isRetryableStatus(response.statusCode)) {
+          // Server is struggling. Stop the whole pass — continuing would
+          // just queue up more failures against a server that told us to
+          // wait, and every row after this one would be punished too.
+          await DBHelper.markQueueRetryable(
+            id,
+            'Server busy (HTTP ${response.statusCode})',
+          );
+          debugPrint('>>> server busy — aborting individual pass');
+          break;
+        }
+
         if (response.statusCode >= 200 && response.statusCode < 300) {
           final body = jsonDecode(response.body);
           if (body['success'] == true) {
@@ -320,12 +450,13 @@ class SyncService {
           );
         }
       } on TimeoutException {
-        await DBHelper.markQueueError(id, 'Timeout during individual sync');
+        // Not the row's fault. Do not count it.
+        await DBHelper.markQueueRetryable(id, 'Timeout during individual sync');
         continue;
       } on SocketException {
         break; // offline — stop, don't burn attempts on the rest
       } catch (e) {
-        await DBHelper.markQueueError(id, 'Individual sync failed: $e');
+        await DBHelper.markQueueRetryable(id, 'Network problem: $e');
         continue;
       }
     }
@@ -336,18 +467,21 @@ class SyncService {
   // =========================================================================
 
   Future<bool> pullFromServer({required String branchId}) async {
+     if (_isPulling) {
+      debugPrint('>>> pull already running — skipping');
+      return false;
+    }
+    _isPulling = true;
     try {
       debugPrint('>>> pullFromServer start: $branchId');
 
-      // Refuse to pull while work is still queued — the server's totals
-      // wouldn't include it yet, and local stock would flicker backwards.
       final stillPending = await DBHelper.getPendingSyncCount(branchId);
       if (stillPending > 0) {
         debugPrint('>>> skipping pull: $stillPending rows still pending');
         return false;
       }
+        
 
-      // ---- Items -------------------------------------------------------
       http.Response itemsRes;
       try {
         itemsRes = await http
@@ -374,11 +508,6 @@ class SyncService {
             await DBHelper.upsertItemFromServer(Map<String, dynamic>.from(item));
           }
 
-          // Reap items the server no longer has.
-          //
-          // GUARD: never do this on an empty server list. A blank-but-
-          // successful response would otherwise wipe the entire local
-          // catalogue on every device at once.
           if (items.isNotEmpty) {
             await _reapDeletedItems(branchId, serverBarcodes);
           } else {
@@ -400,7 +529,9 @@ class SyncService {
           final body = jsonDecode(salesRes.body);
           if (body['success'] == true) {
             for (final sale in (body['data'] as List? ?? [])) {
-              await DBHelper.upsertSaleFromServer(Map<String, dynamic>.from(sale));
+              await DBHelper.upsertSaleFromServer(
+                Map<String, dynamic>.from(sale),
+              );
             }
           }
         }
@@ -408,7 +539,6 @@ class SyncService {
         debugPrint('>>> sales request failed: $e');
       }
 
-      // ---- History -----------------------------------------------------
       try {
         final historyRes = await http
             .get(
@@ -421,7 +551,9 @@ class SyncService {
           final body = jsonDecode(historyRes.body);
           if (body['success'] == true) {
             for (final h in (body['data'] as List? ?? [])) {
-              await DBHelper.upsertHistoryFromServer(Map<String, dynamic>.from(h));
+              await DBHelper.upsertHistoryFromServer(
+                Map<String, dynamic>.from(h),
+              );
             }
           }
         }
@@ -434,6 +566,8 @@ class SyncService {
     } catch (e) {
       debugPrint('pullFromServer error: $e');
       return false;
+    } finally {
+      _isPulling = false;
     }
   }
 
@@ -447,7 +581,8 @@ class SyncService {
     for (final row in pendingQueue) {
       try {
         final payload =
-            jsonDecode(row['payload']?.toString() ?? '{}') as Map<String, dynamic>;
+            jsonDecode(row['payload']?.toString() ?? '{}')
+                as Map<String, dynamic>;
         final barcode = payload['barcode']?.toString() ?? '';
         if (barcode.isNotEmpty) pendingBarcodes.add(barcode);
       } catch (_) {}

@@ -98,13 +98,15 @@ class _HomePageState extends State<HomePage> {
   static const String _inventoryEditPassword = "5408098";
 
   List<Map<String, Object?>> _inventoryItems = [];
-
+  int _unsentCount = 0;
+  int _failedCount = 0;
   late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
 
   @override
   void initState() {
     super.initState();
     _loadInventoryItems();
+    _refreshSyncBadge();
     _syncService.startListening(branchId: _currentBranch);
     _syncService.syncPending(branchId: _currentBranch);
     _loadInitialTransactionLogs();
@@ -118,9 +120,21 @@ class _HomePageState extends State<HomePage> {
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final ok = await _syncService.synchronize(branchId: _currentBranch);
-      if (ok && mounted) {
+      final result = await _syncService.synchronize(branchId: _currentBranch);
+      if (mounted) {
         await _loadInventoryItems();
+        await _refreshSyncBadge();
+
+        // Tell the user immediately if data is stuck on this device.
+        if (result.hasUnsentData && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result.summary),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
       }
     });
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((
@@ -142,6 +156,102 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<void> _showSyncDiagnostics() async {
+    final pending = await DBHelper.getPendingSyncCount(_currentBranch);
+    final parked = await DBHelper.getParkedSyncCount(_currentBranch);
+    final failedRows = await DBHelper.getFailedSyncRows(_currentBranch);
+    final oldest = await DBHelper.getOldestUnsentAt(_currentBranch);
+
+    if (!mounted) return;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        builder: (_, scrollController) => Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Sync status',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              Text('Device: ${_currentBranch}'),
+              Text('Waiting to send: $pending'),
+              Text(
+                'Failed: $parked',
+                style: TextStyle(
+                  color: parked > 0 ? Colors.red : Colors.black,
+                  fontWeight: parked > 0 ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+              if (oldest != null)
+                Text('Oldest unsent: ${ShopTime.dateTimeOf(oldest)}'),
+              const SizedBox(height: 12),
+              if (parked > 0)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.refresh),
+                    label: Text('Retry $parked failed items'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () async {
+                      await DBHelper.recoverFailedTransactions();
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      final r = await _syncService.synchronize(
+                        branchId: _currentBranch,
+                      );
+                      if (mounted) {
+                        await _loadInventoryItems();
+                        await _refreshSyncBadge();
+                        ScaffoldMessenger.of(
+                          context,
+                        ).showSnackBar(SnackBar(content: Text(r.summary)));
+                      }
+                    },
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Text(
+                'Recent failures',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              Expanded(
+                child: failedRows.isEmpty
+                    ? const Center(child: Text('None'))
+                    : ListView.builder(
+                        controller: scrollController,
+                        itemCount: failedRows.length,
+                        itemBuilder: (_, i) {
+                          final r = failedRows[i];
+                          return ListTile(
+                            dense: true,
+                            title: Text(
+                              '${r['entityType']} / ${r['operation']}',
+                            ),
+                            subtitle: Text(
+                              '${ShopTime.dateTimeOf(r['createdAt'])}\n'
+                              '${r['lastError'] ?? 'no error recorded'}',
+                            ),
+                            isThreeLine: true,
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _loadInventoryItems() async {
     final items = await DBHelper.getItems();
 
@@ -149,6 +259,16 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       _inventoryItems = items;
+    });
+  }
+
+  Future<void> _refreshSyncBadge() async {
+    final pending = await DBHelper.getPendingSyncCount(_currentBranch);
+    final parked = await DBHelper.getParkedSyncCount(_currentBranch);
+    if (!mounted) return;
+    setState(() {
+      _unsentCount = pending;
+      _failedCount = parked;
     });
   }
 
@@ -259,19 +379,20 @@ class _HomePageState extends State<HomePage> {
       );
     }
   }
-Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
-  List<Map<String, dynamic>> logs,
-) {
-  final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
- 
-  for (final sale in logs) {
-    final String dateKey = ShopTime.dateOf(sale['saleDate']);
-    groupedLogs.putIfAbsent(dateKey, () => []);
-    groupedLogs[dateKey]!.add(sale);
+
+  Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
+    List<Map<String, dynamic>> logs,
+  ) {
+    final Map<String, List<Map<String, dynamic>>> groupedLogs = {};
+
+    for (final sale in logs) {
+      final String dateKey = ShopTime.dateOf(sale['saleDate']);
+      groupedLogs.putIfAbsent(dateKey, () => []);
+      groupedLogs[dateKey]!.add(sale);
+    }
+
+    return groupedLogs;
   }
- 
-  return groupedLogs;
-}
 
   Widget _buildTransactionLogsBottomLoader() {
     if (_isTransactionLogsLoadingMore) {
@@ -817,7 +938,9 @@ Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
                               final String saleDate =
                                   saleRecord['saleDate']?.toString() ?? '';
 
-                             final String timeDisplay = ShopTime.timeOf(saleRecord['saleDate']);
+                              final String timeDisplay = ShopTime.timeOf(
+                                saleRecord['saleDate'],
+                              );
 
                               final String type =
                                   saleRecord['type']?.toString() ?? '';
@@ -1284,6 +1407,33 @@ Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
     );
   }
 
+  Widget _syncIcon() {
+    final int total = _unsentCount + _failedCount;
+    if (total == 0) return const Icon(Icons.sync);
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        const Icon(Icons.sync),
+        Positioned(
+          right: -6,
+          top: -4,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: _failedCount > 0 ? Colors.red : Colors.orange,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              total > 99 ? '99+' : '$total',
+              style: const TextStyle(color: Colors.white, fontSize: 10),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1307,53 +1457,54 @@ Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
         centerTitle: true,
         backgroundColor: Colors.amber,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.sync),
-            color: Colors.black87,
-            tooltip: 'Sync with Server',
-            onPressed: () async {
-              bool isOnline = await _checkInternetConnection();
-              if (!isOnline) {
+          GestureDetector(
+            onLongPress: _showSyncDiagnostics,
+            child: IconButton(
+              icon: _syncIcon(),
+              color: Colors.black87,
+              tooltip: 'Sync with Server',
+              onPressed: () async {
+                bool isOnline = await _checkInternetConnection();
+                if (!isOnline) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text("No internet connection."),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
+                  return;
+                }
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text("No internet connection."),
-                      backgroundColor: Colors.red,
-                    ),
+                    const SnackBar(content: Text("Syncing with server...")),
                   );
                 }
-                return;
-              }
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Syncing with server...")),
+
+                final SyncResult result = await _syncService.synchronize(
+                  branchId: _currentBranch,
                 );
-              }
+                final bool synced = result.ok && !result.hasUnsentData;
 
-              final bool synced = await _syncService.synchronize(
-                branchId: _currentBranch,
-              );
-
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      synced
-                          ? "Sync Complete"
-                          : "Sync incomplete — some changes are still queued",
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(result.summary),
+                      backgroundColor: synced ? Colors.green : Colors.orange,
                     ),
-                    backgroundColor: synced ? Colors.green : Colors.orange,
-                  ),
-                );
+                  );
 
-                // The clear-then-reassign dance below is no longer needed: getItems()
-                // returns a fresh deep copy, so setState sees a new object either way.
-                final freshItems = await DBHelper.getItems();
-                setState(() {
-                  _inventoryItems = freshItems;
-                });
-              }
-            },
+                  // The clear-then-reassign dance below is no longer needed: getItems()
+                  // returns a fresh deep copy, so setState sees a new object either way.
+                  final freshItems = await DBHelper.getItems();
+                  setState(() {
+                    _inventoryItems = freshItems;
+                  });
+                  await _refreshSyncBadge();
+                }
+              },
+            ),
           ),
           if (_selectedIndex == 0) ...[
             IconButton(
@@ -1945,7 +2096,13 @@ Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
 
   Widget _buildHomeTab() {
     return Padding(
-      padding: const EdgeInsets.all(12.0),
+      // 1. Add extra bottom padding (e.g. 60–80 dp) to lift the entire content
+      padding: const EdgeInsets.only(
+        left: 12.0,
+        right: 12.0,
+        top: 12.0,
+        bottom: 64.0,
+      ),
       child: Column(
         children: [
           Opacity(
@@ -2466,6 +2623,7 @@ Map<String, List<Map<String, dynamic>>> _groupTransactionLogsByDate(
                 onRefresh: () async {
                   await _syncService.synchronize(branchId: _currentBranch);
                   await _loadInventoryItems();
+                  await _refreshSyncBadge();
                 },
                 child: _inventoryItems.isEmpty
                     ? ListView(
