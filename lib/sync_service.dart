@@ -539,26 +539,15 @@ class SyncService {
         debugPrint('>>> sales request failed: $e');
       }
 
-      try {
-        final historyRes = await http
-            .get(
-              Uri.parse('$baseUrl/api/$branchId/history'),
-              headers: {'x-api-key': apiKey},
-            )
-            .timeout(const Duration(seconds: 60));
-
-        if (historyRes.statusCode == 200) {
-          final body = jsonDecode(historyRes.body);
-          if (body['success'] == true) {
-            for (final h in (body['data'] as List? ?? [])) {
-              await DBHelper.upsertHistoryFromServer(
-                Map<String, dynamic>.from(h),
-              );
-            }
-          }
-        }
-      } catch (e) {
-        debugPrint('>>> history request failed: $e');
+      // ---- Item history ------------------------------------------------
+      // /history is paginated on the server. The old code called it once,
+      // therefore the phone only received the newest page (500 by default).
+      // This helper performs a one-time historical backfill, then future
+      // syncs use sinceId so we only download newly-added history rows.
+      final historyOk = await _pullHistory(branchId);
+      if (!historyOk) {
+        debugPrint('>>> history pull incomplete');
+        return false;
       }
 
       debugPrint('>>> pullFromServer done');
@@ -569,6 +558,166 @@ class SyncService {
     } finally {
       _isPulling = false;
     }
+  }
+
+
+  static const int _historyPageSize = 1000;
+
+  Future<Map<String, dynamic>?> _getHistoryPage(
+    String branchId, {
+    int? sinceId,
+    int? offset,
+  }) async {
+    final params = <String, String>{
+      'limit': _historyPageSize.toString(),
+    };
+    if (sinceId != null) params['sinceId'] = sinceId.toString();
+    if (offset != null) params['offset'] = offset.toString();
+
+    final uri = Uri.parse('$baseUrl/api/$branchId/history').replace(
+      queryParameters: params,
+    );
+
+    try {
+      final response = await http
+          .get(uri, headers: {'x-api-key': apiKey})
+          .timeout(const Duration(seconds: 60));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          '>>> history HTTP ${response.statusCode}: ${response.body}',
+        );
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic> || decoded['success'] != true) {
+        debugPrint('>>> history response was not successful');
+        return null;
+      }
+      return decoded;
+    } on TimeoutException catch (e) {
+      debugPrint('>>> history timeout: $e');
+      return null;
+    } on SocketException catch (e) {
+      debugPrint('>>> history offline: $e');
+      return null;
+    } catch (e) {
+      debugPrint('>>> history request failed: $e');
+      return null;
+    }
+  }
+
+  Future<void> _saveHistoryRows(List rows) async {
+    for (final h in rows) {
+      if (h is Map) {
+        await DBHelper.upsertHistoryFromServer(
+          Map<String, dynamic>.from(h),
+        );
+      }
+    }
+  }
+
+  int? _historyServerId(dynamic row) {
+    if (row is! Map) return null;
+    return int.tryParse((row['id'] ?? row['serverId'] ?? '').toString());
+  }
+
+  Future<int?> _latestLocalHistoryServerId() async {
+    final db = await DBHelper.database;
+    final rows = await db.rawQuery(
+      'SELECT MAX(serverId) AS value '
+      'FROM item_history WHERE serverId IS NOT NULL',
+    );
+    final value = rows.first['value'];
+    if (value == null) return null;
+    return (value as num).toInt();
+  }
+
+  Future<bool> _historyBackfillIsComplete(String branchId) async {
+    final db = await DBHelper.database;
+    final key = 'historyBackfillComplete:$branchId';
+    final rows = await db.query(
+      'app_meta',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isNotEmpty && rows.first['value']?.toString() == '1';
+  }
+
+  Future<void> _markHistoryBackfillComplete(String branchId) async {
+    final db = await DBHelper.database;
+    await db.rawInsert(
+      'INSERT OR REPLACE INTO app_meta(key, value) VALUES(?, ?)',
+      ['historyBackfillComplete:$branchId', '1'],
+    );
+  }
+
+  Future<bool> _pullHistory(String branchId) async {
+    // 1) Normal sync: download only history rows newer than the highest
+    // serverId already stored on this phone.
+    int? latestId = await _latestLocalHistoryServerId();
+
+    if (latestId != null) {
+      int cursor = latestId;
+
+      while (true) {
+        final body = await _getHistoryPage(branchId, sinceId: cursor);
+        if (body == null) return false;
+
+        final List rows = body['data'] as List? ?? const [];
+        if (rows.isEmpty) break;
+
+        await _saveHistoryRows(rows);
+
+        final ids = rows.map(_historyServerId).whereType<int>().toList();
+        if (ids.isEmpty) break;
+
+        final nextCursor = ids.reduce((a, b) => a > b ? a : b);
+        if (nextCursor <= cursor) break;
+        cursor = nextCursor;
+
+        if (rows.length < _historyPageSize) break;
+      }
+    }
+
+    // 2) One-time backfill. This is the part your old sync was missing.
+    // Your current Express route already supports limit + offset, so there
+    // is no backend change required for this version.
+    final backfillDone = await _historyBackfillIsComplete(branchId);
+
+    // If there is no local server history at all, backfill even if a stale
+    // marker somehow exists (for example after local history was cleared).
+    latestId = await _latestLocalHistoryServerId();
+    if (!backfillDone || latestId == null) {
+      int offset = 0;
+      int totalReceived = 0;
+
+      while (true) {
+        final body = await _getHistoryPage(branchId, offset: offset);
+        if (body == null) return false;
+
+        final List rows = body['data'] as List? ?? const [];
+        debugPrint(
+          '>>> history backfill: offset=$offset, received=${rows.length}',
+        );
+
+        if (rows.isEmpty) break;
+
+        await _saveHistoryRows(rows);
+        totalReceived += rows.length;
+
+        if (rows.length < _historyPageSize) break;
+        offset += rows.length;
+      }
+
+      await _markHistoryBackfillComplete(branchId);
+      debugPrint('>>> history backfill complete: $totalReceived rows');
+    }
+
+    return true;
   }
 
   Future<void> _reapDeletedItems(

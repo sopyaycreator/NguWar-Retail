@@ -39,7 +39,8 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
   final List<Map<String, dynamic>> _historyLogs = [];
 
 
-  static const int _pageSize = 20;
+  // Load 10 distinct dates at a time, not 20 raw history rows.
+  static const int _pageSize = 10;
 
 
   int _offset = 0;
@@ -68,6 +69,20 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
   }
 
 
+  Future<List<Map<String, dynamic>>> _loadLogsForDates(
+    List<String> dateKeys,
+  ) async {
+    final List<Map<String, dynamic>> logs = [];
+
+    for (final dateKey in dateKeys) {
+      final dailyLogs = await DBHelper.getItemHistoryByDate(dateKey);
+      logs.addAll(dailyLogs);
+    }
+
+    return logs;
+  }
+
+
   Future<void> _loadFirstPage() async {
     setState(() {
       _isInitialLoading = true;
@@ -78,8 +93,13 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     });
 
 
+    final List<String> firstDates =
+        await DBHelper.getItemHistoryDatesPaginated(
+      limit: _pageSize,
+      offset: 0,
+    );
     final List<Map<String, dynamic>> firstPage =
-        await DBHelper.getItemHistoryPaginated(limit: _pageSize, offset: 0);
+        await _loadLogsForDates(firstDates);
 
 
     if (!mounted) return;
@@ -87,8 +107,8 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
     setState(() {
       _historyLogs.addAll(firstPage);
-      _offset = firstPage.length;
-      _hasMore = firstPage.length == _pageSize;
+      _offset = firstDates.length;
+      _hasMore = firstDates.length == _pageSize;
       _isInitialLoading = false;
     });
   }
@@ -103,11 +123,13 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
     });
 
 
-    final List<Map<String, dynamic>> nextPage =
-        await DBHelper.getItemHistoryPaginated(
+    final List<String> nextDates =
+        await DBHelper.getItemHistoryDatesPaginated(
       limit: _pageSize,
       offset: _offset,
     );
+    final List<Map<String, dynamic>> nextPage =
+        await _loadLogsForDates(nextDates);
 
 
     if (!mounted) return;
@@ -115,8 +137,8 @@ class _ItemHistoryPageState extends State<ItemHistoryPage> {
 
     setState(() {
       _historyLogs.addAll(nextPage);
-      _offset += nextPage.length;
-      _hasMore = nextPage.length == _pageSize;
+      _offset += nextDates.length;
+      _hasMore = nextDates.length == _pageSize;
       _isLoadingMore = false;
     });
   }

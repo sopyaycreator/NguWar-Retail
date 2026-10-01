@@ -5,23 +5,6 @@ import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import 'shop_time.dart';
-
-/// ---------------------------------------------------------------------------
-/// THE ONE RULE THIS FILE ENFORCES
-///
-/// Stock is never ASSIGNED. It is only ADDED TO.
-///
-///   WRONG:  UPDATE items SET quantity = 8
-///   RIGHT:  UPDATE items SET quantity = quantity + (-2)
-///
-/// The device reports what happened (a signed delta). The server adds the
-/// deltas from every device together. Two offline devices can then both be
-/// right, and the order they sync in stops mattering.
-///
-/// Every stock change goes through recordStockMovement(). If you add a new
-/// feature that moves stock, it goes through there too — no exceptions, or
-/// that path will silently lose data on multi-device shops.
-/// ---------------------------------------------------------------------------
 class DBHelper {
   static Database? _db;
 
@@ -267,13 +250,6 @@ class DBHelper {
     }
   }
 
-  // =========================================================================
-  // DEVICE IDENTITY
-  //
-  // Previously every device reported 'flutter-device-$branchId', so Device A
-  // and Device B were indistinguishable in sync_log — which is part of why
-  // this bug was invisible. Each install now gets its own permanent id.
-  // =========================================================================
 
   static String? _cachedDeviceId;
 
@@ -362,11 +338,7 @@ class DBHelper {
       ids,
     );
   }
-/// A TEMPORARY problem — timeout, offline, HTTP 503 "Database busy".
-  ///
-  /// Records what happened for diagnostics but does NOT count an attempt,
-  /// so the row can never be parked because the server was slow. This is
-  /// the single most important change in this fix.
+
   static Future<void> markQueueRetryable(int id, String errorMsg) async {
     final db = await database;
     await db.rawUpdate(
@@ -463,16 +435,6 @@ class DBHelper {
     return (result.first['count'] as int?) ?? 0;
   }
 
-  // =========================================================================
-  // STOCK MOVEMENTS — the heart of the fix
-  // =========================================================================
-
-  /// Records a stock movement: writes the ledger row, adjusts local stock by
-  /// ADDITION, and queues the movement for the server.
-  ///
-  /// [delta] is SIGNED:  -2 = two left the shelf,  +5 = five arrived.
-  ///
-  /// Must be called inside a transaction — pass the txn as [executor].
   static Future<void> recordStockMovement(
     DatabaseExecutor executor, {
     required String barcode,
@@ -546,17 +508,6 @@ class DBHelper {
     });
   }
 
-  // =========================================================================
-  // SALES
-  // =========================================================================
-
-  /// Records a sale AND the stock that left the shelf, in one transaction.
-  ///
-  /// [lines] = [{ 'barcode': '123', 'itemName': 'Coke', 'qty': 2 }, ...]
-  ///
-  /// The old code recorded the sale but reduced stock through a separate
-  /// absolute write, and never wrote a history row — which is why there were
-  /// zero 'Sale' rows in a 3,841-row history table.
   static Future<void> insertSaleWithStock({
     required Map<String, dynamic> sale,
     required List<Map<String, dynamic>> lines,
@@ -632,15 +583,6 @@ class DBHelper {
     });
   }
 
-  // =========================================================================
-  // ITEMS
-  // =========================================================================
-
-  /// Creates an item, or adds stock to an existing one.
-  ///
-  /// `item['quantity']` means "the amount being ADDED", not the new total.
-  /// The item sync payload deliberately carries NO quantity — that field is
-  /// what used to overwrite the other device's sales.
   static Future<void> insertOrUpdateItem(
     Map<String, dynamic> item, {
     String branchId = defaultBranchId,
@@ -723,14 +665,6 @@ class DBHelper {
     });
   }
 
-  /// Edits an item. `quantity` is the new TOTAL as typed by the user; it is
-  /// converted to a delta so a concurrent sale on another device survives.
-  ///
-  /// [baselineQuantity] is the number the user SAW in the field before
-  /// editing. Always pass it. Without it the delta is measured against the
-  /// current database value, and if the screen was stale — say it showed 10
-  /// while the DB had dropped to 8 — saving an untouched quantity field
-  /// would invent +2 of stock out of nothing.
   static Future<void> updateItemOnly({
     required String barcode,
     required String name,
@@ -955,6 +889,59 @@ class DBHelper {
     return rows.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
+  /// Returns distinct item-history dates, newest first.
+  ///
+  /// Pagination happens by DATE rather than by raw rows. This is important
+  /// because the Item History screen hides Sale/Sold rows. If we paginated
+  /// raw rows first, a busy day full of sales could consume an entire page
+  /// and make older dates appear to be missing.
+  static Future<List<String>> getItemHistoryDatesPaginated({
+    required int limit,
+    required int offset,
+  }) async {
+    final db = await database;
+
+    final rows = await db.rawQuery(
+      '''
+      SELECT ${ShopTime.sqlLocalDateCreatedAt} AS dateKey
+      FROM item_history
+      WHERE createdAt IS NOT NULL
+        AND length(createdAt) >= 10
+        AND lower(trim(COALESCE(action, ''))) NOT IN ('sale', 'sold')
+      GROUP BY dateKey
+      ORDER BY dateKey DESC
+      LIMIT ? OFFSET ?
+      ''',
+      [limit, offset],
+    );
+
+    return rows
+        .map((row) => row['dateKey']?.toString() ?? '')
+        .where((date) => date.isNotEmpty)
+        .toList();
+  }
+
+  /// Returns all visible item-history rows for one shop-local date.
+  static Future<List<Map<String, dynamic>>> getItemHistoryByDate(
+    String dateKey,
+  ) async {
+    final db = await database;
+
+    final rows = await db.rawQuery(
+      '''
+      SELECT *
+      FROM item_history
+      WHERE ${ShopTime.sqlLocalDateCreatedAt} = ?
+        AND lower(trim(COALESCE(action, ''))) NOT IN ('sale', 'sold')
+      ORDER BY createdAt DESC, id DESC
+      ''',
+      [dateKey],
+    );
+
+    return rows.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  /// Kept for any existing callers outside ItemHistoryPage.
   static Future<List<Map<String, dynamic>>> getItemHistoryPaginated({
     required int limit,
     required int offset,
